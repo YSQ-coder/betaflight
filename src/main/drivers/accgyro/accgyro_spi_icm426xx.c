@@ -159,7 +159,15 @@ static aafConfig_t aafLUT42688[AAF_CONFIG_COUNT] = {  // see table in section 5.
     [AAF_CONFIG_1962HZ] = { 37, 1376,  4 },
 };
 
-// Possible gyro Anti-Alias Filter (AAF) cutoffs for ICM-42688P
+// Possible gyro Anti-Alias Filter (AAF) cutoffs for IIM-42652
+static aafConfig_t aafLUT42652[AAF_CONFIG_COUNT] = {
+    [AAF_CONFIG_258HZ]  = {  6,   36, 10 },
+    [AAF_CONFIG_536HZ]  = { 12,  144,  8 },
+    [AAF_CONFIG_997HZ]  = { 21,  440,  6 },
+    [AAF_CONFIG_1962HZ] = { 37, 1376,  4 },
+};
+
+// Possible gyro Anti-Alias Filter (AAF) cutoffs for ICM-42605
 // actual cutoff differs slightly from those of the 42688P
 static aafConfig_t aafLUT42605[AAF_CONFIG_COUNT] = {  // see table in section 5.3
     [AAF_CONFIG_258HZ]  = { 21,  440,  6 }, // actually 249 Hz
@@ -184,6 +192,12 @@ uint8_t icm426xxSpiDetect(const extDevice_t *dev)
         case ICM42688P_WHO_AM_I_CONST:
             icmDetected = ICM_42688P_SPI;
             break;
+        case IIM42652_WHO_AM_I_CONST:
+            icmDetected = IIM_42652_SPI;
+            break;
+        case IIM42653_WHO_AM_I_CONST:
+            icmDetected = IIM_42653_SPI;
+            break;
         default:
             icmDetected = MPU_NONE;
             break;
@@ -201,7 +215,15 @@ uint8_t icm426xxSpiDetect(const extDevice_t *dev)
 
 void icm426xxAccInit(accDev_t *acc)
 {
-    acc->acc_1G = 512 * 4;
+    switch (acc->mpuDetectionResult.sensor) {
+    case IIM_42652_SPI:
+    case IIM_42653_SPI:
+        acc->acc_1G = 512 * 4; // Accel scale 16g (2048 LSB/g)
+        break;
+    default:
+        acc->acc_1G = 512 * 4; // Accel scale 16g (2048 LSB/g)
+        break;
+    }
 }
 
 bool icm426xxSpiAccDetect(accDev_t *acc)
@@ -210,6 +232,10 @@ bool icm426xxSpiAccDetect(accDev_t *acc)
     case ICM_42605_SPI:
         break;
     case ICM_42688P_SPI:
+        break;
+    case IIM_42652_SPI:
+        break;
+    case IIM_42653_SPI:
         break;
     default:
         return false;
@@ -307,12 +333,19 @@ void icm426xxGyroInit(gyroDev_t *gyro)
         gyro->gyroRateKHz = GYRO_RATE_1_kHz;
     }
 
-    STATIC_ASSERT(INV_FSR_2000DPS == 3, "INV_FSR_2000DPS must be 3 to generate correct value");
-    spiWriteReg(dev, ICM426XX_RA_GYRO_CONFIG0, (3 - INV_FSR_2000DPS) << 5 | (odrConfig & 0x0F));
-    delay(15);
+    // Configure gyro/accel full-scale range to remain at ±2000 dps / ±16 g across the 426xx family.
+    // IIM-42653 requires FS_SEL=1 to achieve this range (FS_SEL=0 maps to ±4000 dps / ±32 g).
+    uint8_t gyroFsSel = (0 << 5);  // ±2000 dps for ICM42605/42688P/IIM42652
+    uint8_t accelFsSel = (0 << 5); // ±16 g for ICM42605/42688P/IIM42652
+    if (gyroModel == IIM_42653_SPI) {
+        gyroFsSel = (1 << 5);  // ±2000 dps on IIM42653 (FS_SEL=1)
+        accelFsSel = (1 << 5); // ±16 g  on IIM42653 (FS_SEL=1)
+    }
 
-    STATIC_ASSERT(INV_FSR_16G == 3, "INV_FSR_16G must be 3 to generate correct value");
-    spiWriteReg(dev, ICM426XX_RA_ACCEL_CONFIG0, (3 - INV_FSR_16G) << 5 | (odrConfig & 0x0F));
+    // Apply full-scale range and ODR
+    spiWriteReg(dev, ICM426XX_RA_GYRO_CONFIG0, gyroFsSel | (odrConfig & 0x0F));
+    delay(15);
+    spiWriteReg(dev, ICM426XX_RA_ACCEL_CONFIG0, accelFsSel | (odrConfig & 0x0F));
     delay(15);
 }
 
@@ -322,6 +355,10 @@ bool icm426xxSpiGyroDetect(gyroDev_t *gyro)
     case ICM_42605_SPI:
         break;
     case ICM_42688P_SPI:
+        break;
+    case IIM_42652_SPI:
+    case IIM_42653_SPI:
+        gyro->scale = GYRO_SCALE_2000DPS;
         break;
     default:
         return false;
@@ -348,6 +385,19 @@ static aafConfig_t getGyroAafConfig(const mpuSensor_e gyroModel, const aafConfig
             return aafLUT42605[AAF_CONFIG_997HZ];
         default:
             return aafLUT42605[AAF_CONFIG_258HZ];
+        }
+
+    case IIM_42652_SPI:
+    case IIM_42653_SPI:
+        switch (config) {
+        case GYRO_HARDWARE_LPF_NORMAL:
+            return aafLUT42652[AAF_CONFIG_258HZ];
+        case GYRO_HARDWARE_LPF_OPTION_1:
+            return aafLUT42652[AAF_CONFIG_536HZ];
+        case GYRO_HARDWARE_LPF_OPTION_2:
+            return aafLUT42652[AAF_CONFIG_997HZ];
+        default:
+            return aafLUT42652[AAF_CONFIG_258HZ];
         }
 
     case ICM_42688P_SPI:
