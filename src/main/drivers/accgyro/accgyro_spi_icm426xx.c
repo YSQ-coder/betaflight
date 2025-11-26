@@ -173,6 +173,14 @@ static aafConfig_t aafLUT42688[AAF_CONFIG_COUNT] = {  // see table in section 5.
     [AAF_CONFIG_1962HZ] = { 37, 1376,  4 },
 };
 
+// Possible gyro Anti-Alias Filter (AAF) cutoffs for IIM-42652
+static aafConfig_t aafLUT42652[AAF_CONFIG_COUNT] = {
+    [AAF_CONFIG_258HZ]  = {  6,   36, 10 },
+    [AAF_CONFIG_536HZ]  = { 12,  144,  8 },
+    [AAF_CONFIG_997HZ]  = { 21,  440,  6 },
+    [AAF_CONFIG_1962HZ] = { 37, 1376,  4 },
+};
+
 // Possible gyro Anti-Alias Filter (AAF) cutoffs for ICM-42605
 // actual cutoff differs slightly from those of the 42688P
 static aafConfig_t aafLUT42605[AAF_CONFIG_COUNT] = {  // see table in section 5.3
@@ -316,9 +324,9 @@ uint8_t icm426xxSpiDetect(const extDevice_t *dev)
 void icm426xxAccInit(accDev_t *acc)
 {
     switch (acc->mpuDetectionResult.sensor) {
-    case IIM_42653_SPI:
     case IIM_42652_SPI:
-        acc->acc_1G = 512 * 2; // Accel scale 32g (1024 LSB/g)
+    case IIM_42653_SPI:
+        acc->acc_1G = 512 * 4; // Accel scale 16g (2048 LSB/g)
         break;
     default:
         acc->acc_1G = 512 * 4; // Accel scale 16g (2048 LSB/g)
@@ -424,12 +432,19 @@ void icm426xxGyroInit(gyroDev_t *gyro)
         gyro->gyroRateKHz = GYRO_RATE_1_kHz;
     }
 
-    // This sets the gyro/accel to the maximum FSR, depending on the chip
-    // ICM42605, ICM_42688P: 2000DPS and 16G.
-    // IIM42653: 4000DPS and 32G
-    spiWriteReg(dev, ICM426XX_RA_GYRO_CONFIG0, (0 << 5) | (odrConfig & 0x0F));
+    // Configure gyro/accel full-scale range to remain at ±2000 dps / ±16 g across the 426xx family.
+    // IIM-42653 requires FS_SEL=1 to achieve this range (FS_SEL=0 maps to ±4000 dps / ±32 g).
+    uint8_t gyroFsSel = (0 << 5);  // ±2000 dps for ICM42605/42688P/IIM42652
+    uint8_t accelFsSel = (0 << 5); // ±16 g for ICM42605/42688P/IIM42652
+    if (gyroModel == IIM_42653_SPI) {
+        gyroFsSel = (1 << 5);  // ±2000 dps on IIM42653 (FS_SEL=1)
+        accelFsSel = (1 << 5); // ±16 g  on IIM42653 (FS_SEL=1)
+    }
+
+    // Apply full-scale range and ODR
+    spiWriteReg(dev, ICM426XX_RA_GYRO_CONFIG0, gyroFsSel | (odrConfig & 0x0F));
     delay(15);
-    spiWriteReg(dev, ICM426XX_RA_ACCEL_CONFIG0, (0 << 5) | (odrConfig & 0x0F));
+    spiWriteReg(dev, ICM426XX_RA_ACCEL_CONFIG0, accelFsSel | (odrConfig & 0x0F));
     delay(15);
 }
 
@@ -442,7 +457,7 @@ bool icm426xxSpiGyroDetect(gyroDev_t *gyro)
         break;
     case IIM_42652_SPI:
     case IIM_42653_SPI:
-        gyro->scale = GYRO_SCALE_4000DPS;
+        gyro->scale = GYRO_SCALE_2000DPS;
         break;
     default:
         return false;
@@ -458,8 +473,6 @@ static aafConfig_t getGyroAafConfig(const mpuSensor_e gyroModel, const aafConfig
 {
     switch (gyroModel){
     case ICM_42605_SPI:
-    case IIM_42652_SPI:
-    case IIM_42653_SPI:
         switch (config) {
         case GYRO_HARDWARE_LPF_NORMAL:
             return aafLUT42605[AAF_CONFIG_258HZ];
@@ -469,6 +482,19 @@ static aafConfig_t getGyroAafConfig(const mpuSensor_e gyroModel, const aafConfig
             return aafLUT42605[AAF_CONFIG_997HZ];
         default:
             return aafLUT42605[AAF_CONFIG_258HZ];
+        }
+
+    case IIM_42652_SPI:
+    case IIM_42653_SPI:
+        switch (config) {
+        case GYRO_HARDWARE_LPF_NORMAL:
+            return aafLUT42652[AAF_CONFIG_258HZ];
+        case GYRO_HARDWARE_LPF_OPTION_1:
+            return aafLUT42652[AAF_CONFIG_536HZ];
+        case GYRO_HARDWARE_LPF_OPTION_2:
+            return aafLUT42652[AAF_CONFIG_997HZ];
+        default:
+            return aafLUT42652[AAF_CONFIG_258HZ];
         }
 
     case ICM_42688P_SPI:
