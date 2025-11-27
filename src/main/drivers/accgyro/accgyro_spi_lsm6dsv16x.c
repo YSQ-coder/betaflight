@@ -28,7 +28,9 @@
 
 #include "accgyro_spi_lsm6dsv16x.h"
 
+#include "drivers/time.h"
 #include "sensors/gyro.h"
+#include "sensors/acceleration.h"
 
 /* See datasheet
  *
@@ -899,10 +901,11 @@ static FAST_CODE bool lsm6dsv16xAccReadSPI(accDev_t *acc)
         // Wait for completion
         spiWait(&acc->gyro->dev);
 
-        const uint8_t *rx = &acc->gyro->dev.rxBuf[1]; // rx[0] = dummy read per datasheet §5.1 (SPI)
-        acc->ADCRaw[X] = lsm6dsv16xDecodeSample(&rx[1]);
-        acc->ADCRaw[Y] = lsm6dsv16xDecodeSample(&rx[3]);
-        acc->ADCRaw[Z] = lsm6dsv16xDecodeSample(&rx[5]);
+        // Use direct type cast for compatibility with AT32 and other platforms
+        int16_t *accData = (int16_t *)acc->gyro->dev.rxBuf;
+        acc->ADCRaw[X] = accData[1];
+        acc->ADCRaw[Y] = accData[2];
+        acc->ADCRaw[Z] = accData[3];
         break;
     }
 
@@ -912,10 +915,10 @@ static FAST_CODE bool lsm6dsv16xAccReadSPI(accDev_t *acc)
         // up an old value.
 
         // This data was read from the gyro, which is the same SPI device as the acc
-        const uint8_t *rx = &acc->gyro->dev.rxBuf[1];
-        acc->ADCRaw[X] = lsm6dsv16xDecodeSample(&rx[7]);  // 0=dummy, 1..6=gyro, 7..12=acc data (OUTX/Y/Z_A)
-        acc->ADCRaw[Y] = lsm6dsv16xDecodeSample(&rx[9]);
-        acc->ADCRaw[Z] = lsm6dsv16xDecodeSample(&rx[11]);
+        int16_t *accData = (int16_t *)acc->gyro->dev.rxBuf;
+        acc->ADCRaw[X] = accData[4];
+        acc->ADCRaw[Y] = accData[5];
+        acc->ADCRaw[Z] = accData[6];
         break;
     }
 
@@ -961,8 +964,11 @@ void lsm6dsv16xGyroInit(gyroDev_t *gyro)
     // Wait for the device to be ready
     while (spiReadRegMsk(dev, LSM6DSV_CTRL3) & LSM6DSV_CTRL3_SW_RESET) {}
 
+    // Wait for device to stabilize after reset (datasheet says gyro needs 30ms turn-on time)
+    delay(35);
+
     // Autoincrement register address when doing block SPI reads and update continuously
-    spiWriteReg(dev, LSM6DSV_CTRL3, LSM6DSV_CTRL3_IF_INC | LSM6DSV_CTRL3_BDU);      /*BDU bit need to be set*/
+    spiWriteReg(dev, LSM6DSV_CTRL3, LSM6DSV_CTRL3_IF_INC | LSM6DSV_CTRL3_BDU);
 
     // Select high-accuracy ODR mode 1
     spiWriteReg(dev, LSM6DSV_HAODR_CFG,
@@ -970,35 +976,19 @@ void lsm6dsv16xGyroInit(gyroDev_t *gyro)
                                     LSM6DSV_HAODR_CFG_HAODR_SEL_MASK,
                                     LSM6DSV_HAODR_CFG_HAODR_SEL_SHIFT));
 
-    // Enable the accelerometer in high accuracy
-    spiWriteReg(dev, LSM6DSV_CTRL1,
-                LSM6DSV_ENCODE_BITS(LSM6DSV_CTRL1_OP_MODE_XL_HIGH_ACCURACY,
-                                    LSM6DSV_CTRL1_OP_MODE_XL_MASK,
-                                    LSM6DSV_CTRL1_OP_MODE_XL_SHIFT));
-
-    // Enable the gyro in high accuracy
-    spiWriteReg(dev, LSM6DSV_CTRL2,
-                LSM6DSV_ENCODE_BITS(LSM6DSV_CTRL2_OP_MODE_G_HIGH_ACCURACY,
-                                    LSM6DSV_CTRL2_OP_MODE_G_MASK,
-                                    LSM6DSV_CTRL2_OP_MODE_G_SHIFT));
-
-    // Enable 16G sensitivity
+    // Set accelerometer: 16G full scale
     spiWriteReg(dev, LSM6DSV_CTRL8,
                 LSM6DSV_ENCODE_BITS(LSM6DSV_CTRL8_FS_XL_16G,
                                     LSM6DSV_CTRL8_FS_XL_MASK,
                                     LSM6DSV_CTRL8_FS_XL_SHIFT));
 
-    // Enable the accelerometer odr at 1kHz
-    spiWriteReg(dev, LSM6DSV_CTRL1,
-                LSM6DSV_ENCODE_BITS(LSM6DSV_CTRL1_ODR_XL_1000HZ,
-                                    LSM6DSV_CTRL1_ODR_XL_MASK,
-                                    LSM6DSV_CTRL1_ODR_XL_SHIFT));
+    // Configure accelerometer: HIGH_ACCURACY mode + 1kHz ODR in single write
+    // CTRL1 = (OP_MODE_XL << 4) | ODR_XL = (1 << 4) | 9 = 0x19
+    spiWriteReg(dev, LSM6DSV_CTRL1, 0x19);
 
-    // Enable the gyro odr at 8kHz
-    spiWriteReg(dev, LSM6DSV_CTRL2,
-                LSM6DSV_ENCODE_BITS(LSM6DSV_CTRL2_ODR_G_8000HZ,
-                                    LSM6DSV_CTRL2_ODR_G_MASK,
-                                    LSM6DSV_CTRL2_ODR_G_SHIFT));
+    // Configure gyroscope: HIGH_ACCURACY mode + 8kHz ODR in single write
+    // CTRL2 = (OP_MODE_G << 4) | ODR_G = (1 << 4) | 12 = 0x1C
+    spiWriteReg(dev, LSM6DSV_CTRL2, 0x1C);
 
     // Enable 2000 deg/s sensitivity and selected LPF1 filter setting
     // Set the LPF1 filter bandwidth
@@ -1110,5 +1100,54 @@ bool lsm6dsv16xSpiGyroDetect(gyroDev_t *gyro)
     gyro->readFn = lsm6dsv16xGyroReadSPI;
 
     return true;
+}
+
+// Debug function to read LSM6DSV16X registers and raw data
+void lsm6dsv16xDebugPrint(gyroDev_t *gyro)
+{
+    if (!gyro || gyro->mpuDetectionResult.sensor != LSM6DSV16X_SPI) {
+        return;
+    }
+
+    const extDevice_t *dev = &gyro->dev;
+
+    // Set SPI clock speed before reading
+    spiSetClkDivisor(dev, spiCalculateDivider(LSM6DSV16X_MAX_SPI_CLK_HZ));
+
+    // Read key registers
+    uint8_t whoami = spiReadRegMsk(dev, LSM6DSV_WHO_AM_I);
+    uint8_t ctrl1 = spiReadRegMsk(dev, LSM6DSV_CTRL1);
+    uint8_t ctrl2 = spiReadRegMsk(dev, LSM6DSV_CTRL2);
+    uint8_t ctrl3 = spiReadRegMsk(dev, LSM6DSV_CTRL3);
+    uint8_t ctrl8 = spiReadRegMsk(dev, LSM6DSV_CTRL8);
+    uint8_t haodr = spiReadRegMsk(dev, LSM6DSV_HAODR_CFG);
+    uint8_t status = spiReadRegMsk(dev, LSM6DSV_STATUS_REG);
+
+    // Read raw accelerometer data directly from registers
+    uint8_t accBuf[7];
+    accBuf[0] = LSM6DSV_OUTX_L_A | 0x80;
+    spiReadRegBuf(dev, LSM6DSV_OUTX_L_A | 0x80, &accBuf[1], 6);
+
+    int16_t accX = (int16_t)((accBuf[2] << 8) | accBuf[1]);
+    int16_t accY = (int16_t)((accBuf[4] << 8) | accBuf[3]);
+    int16_t accZ = (int16_t)((accBuf[6] << 8) | accBuf[5]);
+
+    // Read raw gyro data directly from registers
+    uint8_t gyroBuf[7];
+    spiReadRegBuf(dev, LSM6DSV_OUTX_L_G | 0x80, &gyroBuf[1], 6);
+
+    int16_t gyroX = (int16_t)((gyroBuf[2] << 8) | gyroBuf[1]);
+    int16_t gyroY = (int16_t)((gyroBuf[4] << 8) | gyroBuf[3]);
+    int16_t gyroZ = (int16_t)((gyroBuf[6] << 8) | gyroBuf[5]);
+
+    // Print debug info (use DEBUG_PRINTF or similar)
+    // Format: WHO_AM_I, CTRL1, CTRL2, CTRL3, CTRL8, HAODR, STATUS, gyroMode, accX, accY, accZ, gyroX, gyroY, gyroZ
+    extern void cliPrintf(const char *format, ...);
+    cliPrintf("LSM6DSV16X Debug:\r\n");
+    cliPrintf("  WHO_AM_I=0x%02X CTRL1=0x%02X CTRL2=0x%02X CTRL3=0x%02X\r\n", whoami, ctrl1, ctrl2, ctrl3);
+    cliPrintf("  CTRL8=0x%02X HAODR=0x%02X STATUS=0x%02X gyroMode=%d\r\n", ctrl8, haodr, status, gyro->gyroModeSPI);
+    cliPrintf("  ACC raw: X=%d Y=%d Z=%d\r\n", accX, accY, accZ);
+    cliPrintf("  GYRO raw: X=%d Y=%d Z=%d\r\n", gyroX, gyroY, gyroZ);
+    cliPrintf("  ACC ADCRaw: X=%d Y=%d Z=%d\r\n", acc.dev.ADCRaw[0], acc.dev.ADCRaw[1], acc.dev.ADCRaw[2]);
 }
 #endif // USE_ACCGYRO_LSM6DSV16X

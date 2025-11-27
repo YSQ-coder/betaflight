@@ -4614,6 +4614,22 @@ static const char *getMcuTypeById(mcuTypeId_e id)
     }
 }
 
+#if defined(USE_ACCGYRO_LSM6DSV16X)
+#include "drivers/accgyro/accgyro_spi_lsm6dsv16x.h"
+static void cliGyroDebug(const char *cmdName, char *cmdline)
+{
+    UNUSED(cmdName);
+    UNUSED(cmdline);
+
+    gyroDev_t *gyro = gyroActiveDev();
+    if (gyro && gyro->mpuDetectionResult.sensor == LSM6DSV16X_SPI) {
+        lsm6dsv16xDebugPrint(gyro);
+    } else {
+        cliPrintLine("LSM6DSV16X not detected");
+    }
+}
+#endif
+
 static void cliStatus(const char *cmdName, char *cmdline)
 {
     UNUSED(cmdName);
@@ -6590,6 +6606,9 @@ const clicmd_t cmdTable[] = {
         "\treverse <servo> <source> r|n", cliServoMix),
 #endif
     CLI_COMMAND_DEF("status", "show status", NULL, cliStatus),
+#if defined(USE_ACCGYRO_LSM6DSV16X)
+    CLI_COMMAND_DEF("gyro_debug", "debug LSM6DSV16X registers", NULL, cliGyroDebug),
+#endif
     CLI_COMMAND_DEF("tasks", "show task stats", NULL, cliTasks),
 #ifdef USE_TIMER_MGMT
     CLI_COMMAND_DEF("timer", "show/set timers", "<> | <pin> list | <pin> [af<alternate function>|none|<option(deprecated)>] | list | show", cliTimer),

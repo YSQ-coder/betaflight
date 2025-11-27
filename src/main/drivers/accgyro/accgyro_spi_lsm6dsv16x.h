@@ -31,3 +31,6 @@
 uint8_t lsm6dsv16xSpiDetect(const extDevice_t *dev);
 bool lsm6dsv16xSpiAccDetect(accDev_t *acc);
 bool lsm6dsv16xSpiGyroDetect(gyroDev_t *gyro);
+
+// Debug function
+void lsm6dsv16xDebugPrint(gyroDev_t *gyro);
