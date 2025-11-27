@@ -28,6 +28,7 @@
 
 #include "accgyro_spi_lsm6dsv16x.h"
 
+#include "drivers/time.h"
 #include "sensors/gyro.h"
 
 /* See datasheet
@@ -959,8 +960,11 @@ static void lsm6dsv16xGyroInit(gyroDev_t *gyro)
     // Wait for the device to be ready
     while (spiReadRegMsk(dev, LSM6DSV_CTRL3) & LSM6DSV_CTRL3_SW_RESET) {}
 
+    // Wait for device to stabilize after reset (datasheet says gyro needs 30ms turn-on time)
+    delay(35);
+
     // Autoincrement register address when doing block SPI reads and update continuously
-    spiWriteReg(dev, LSM6DSV_CTRL3, LSM6DSV_CTRL3_IF_INC | LSM6DSV_CTRL3_BDU);      /*BDU bit need to be set*/
+    spiWriteReg(dev, LSM6DSV_CTRL3, LSM6DSV_CTRL3_IF_INC | LSM6DSV_CTRL3_BDU);
 
     // Select high-accuracy ODR mode 1
     spiWriteReg(dev, LSM6DSV_HAODR_CFG,
@@ -968,35 +972,19 @@ static void lsm6dsv16xGyroInit(gyroDev_t *gyro)
                                     LSM6DSV_HAODR_CFG_HAODR_SEL_MASK,
                                     LSM6DSV_HAODR_CFG_HAODR_SEL_SHIFT));
 
-    // Enable the accelerometer in high accuracy
-    spiWriteReg(dev, LSM6DSV_CTRL1,
-                LSM6DSV_ENCODE_BITS(LSM6DSV_CTRL1_OP_MODE_XL_HIGH_ACCURACY,
-                                    LSM6DSV_CTRL1_OP_MODE_XL_MASK,
-                                    LSM6DSV_CTRL1_OP_MODE_XL_SHIFT));
-
-    // Enable the gyro in high accuracy
-    spiWriteReg(dev, LSM6DSV_CTRL2,
-                LSM6DSV_ENCODE_BITS(LSM6DSV_CTRL2_OP_MODE_G_HIGH_ACCURACY,
-                                    LSM6DSV_CTRL2_OP_MODE_G_MASK,
-                                    LSM6DSV_CTRL2_OP_MODE_G_SHIFT));
-
-    // Enable 16G sensitivity
+    // Set accelerometer: 16G full scale
     spiWriteReg(dev, LSM6DSV_CTRL8,
                 LSM6DSV_ENCODE_BITS(LSM6DSV_CTRL8_FS_XL_16G,
                                     LSM6DSV_CTRL8_FS_XL_MASK,
                                     LSM6DSV_CTRL8_FS_XL_SHIFT));
 
-    // Enable the accelerometer odr at 1kHz
-    spiWriteReg(dev, LSM6DSV_CTRL1,
-                LSM6DSV_ENCODE_BITS(LSM6DSV_CTRL1_ODR_XL_1000HZ,
-                                    LSM6DSV_CTRL1_ODR_XL_MASK,
-                                    LSM6DSV_CTRL1_ODR_XL_SHIFT));
+    // Configure accelerometer: HIGH_ACCURACY mode + 1kHz ODR in single write
+    // CTRL1 = (OP_MODE_XL << 4) | ODR_XL = (1 << 4) | 9 = 0x19
+    spiWriteReg(dev, LSM6DSV_CTRL1, 0x19);
 
-    // Enable the gyro odr at 8kHz
-    spiWriteReg(dev, LSM6DSV_CTRL2,
-                LSM6DSV_ENCODE_BITS(LSM6DSV_CTRL2_ODR_G_8000HZ,
-                                    LSM6DSV_CTRL2_ODR_G_MASK,
-                                    LSM6DSV_CTRL2_ODR_G_SHIFT));
+    // Configure gyroscope: HIGH_ACCURACY mode + 8kHz ODR in single write
+    // CTRL2 = (OP_MODE_G << 4) | ODR_G = (1 << 4) | 12 = 0x1C
+    spiWriteReg(dev, LSM6DSV_CTRL2, 0x1C);
 
     // Enable 2000 deg/s sensitivity and selected LPF1 filter setting
     // Set the LPF1 filter bandwidth
