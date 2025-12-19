@@ -105,7 +105,11 @@ bool ws2811LedStripHardwareInit(ioTag_t ioTag)
 
     ws2811IO = IOGetByTag(ioTag);
     IOInit(ws2811IO, OWNER_LED_STRIP, 0);
+#ifdef USE_LED_STRIP_OD_OUTPUT
+    IOConfigGPIOAF(ws2811IO, IO_CONFIG(GPIO_MODE_AF_OD, GPIO_SPEED_FREQ_VERY_HIGH, GPIO_PULLUP), timerHardware->alternateFunction);
+#else
     IOConfigGPIOAF(ws2811IO, IO_CONFIG(GPIO_MODE_AF_PP, GPIO_SPEED_FREQ_VERY_HIGH, GPIO_PULLDOWN), timerHardware->alternateFunction);
+#endif
 
     __DMA1_CLK_ENABLE();
     __DMA2_CLK_ENABLE();

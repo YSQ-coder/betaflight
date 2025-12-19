@@ -104,7 +104,11 @@ bool ws2811LedStripHardwareInit(ioTag_t ioTag)
     ws2811IO = IOGetByTag(ioTag);
     IOInit(ws2811IO, OWNER_LED_STRIP, 0);
 
+#ifdef USE_LED_STRIP_OD_OUTPUT
+    IOConfigGPIOAF(ws2811IO, IOCFG_AF_OD, timerHardware->alternateFunction);
+#else
     IOConfigGPIOAF(ws2811IO, IOCFG_AF_PP, timerHardware->alternateFunction);
+#endif
 
     RCC_ClockCmd(timerRCC(timer), ENABLE);
 
