@@ -23,6 +23,21 @@ README.pdf
 /downloads/
 /tools/
 /build/
+
+# local documentation directory
+/docs/
+
+# local cache directory
+/.cache/
+
+# local IDE/workspace files
+/.cursor/
+
+# clangd/clang tooling output
+/compile_commands.json
+
+# local notes
+/HOW_TO_BUILD_readme.txt
 # local changes only
 mk/local.mk
 
