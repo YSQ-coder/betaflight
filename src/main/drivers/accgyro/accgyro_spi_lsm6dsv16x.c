@@ -24,7 +24,7 @@
 
 #include "platform.h"
 
-#if defined(USE_ACCGYRO_LSM6DSV16X)
+#if defined(USE_ACCGYRO_LSM6DSV16X) || defined(USE_ACCGYRO_LSM6DSK320X)
 
 #include "accgyro_spi_lsm6dsv16x.h"
 
@@ -856,6 +856,20 @@
 #define LSM6DSV_FIFO_DATA_OUT_Z_L           0x7D
 #define LSM6DSV_FIFO_DATA_OUT_Z_H           0x7E
 
+#ifdef USE_ACCGYRO_LSM6DSK320X
+uint8_t lsm6dsk320xSpiDetect(const extDevice_t *dev)
+{
+    const uint8_t whoAmI = spiReadRegMsk(dev, LSM6DSV_WHO_AM_I);
+
+    if (whoAmI != LSM6DSK320X_WHO_AM_I_CONST) {
+        return MPU_NONE;
+    }
+
+    return LSM6DSK320X_SPI;
+}
+#endif
+
+#ifdef USE_ACCGYRO_LSM6DSV16X
 uint8_t lsm6dsv16xSpiDetect(const extDevice_t *dev)
 {
     const uint8_t whoAmI = spiReadRegMsk(dev, LSM6DSV_WHO_AM_I);
@@ -866,6 +880,7 @@ uint8_t lsm6dsv16xSpiDetect(const extDevice_t *dev)
 
     return LSM6DSV16X_SPI;
 }
+#endif
 
 static void lsm6dsv16xAccInit(accDev_t *acc)
 {
@@ -926,6 +941,7 @@ static FAST_CODE bool lsm6dsv16xAccReadSPI(accDev_t *acc)
     return true;
 }
 
+#ifdef USE_ACCGYRO_LSM6DSV16X
 bool lsm6dsv16xSpiAccDetect(accDev_t *acc)
 {
     if (acc->mpuDetectionResult.sensor != LSM6DSV16X_SPI) {
@@ -937,6 +953,21 @@ bool lsm6dsv16xSpiAccDetect(accDev_t *acc)
 
     return true;
 }
+#endif
+
+#ifdef USE_ACCGYRO_LSM6DSK320X
+bool lsm6dsk320xSpiAccDetect(accDev_t *acc)
+{
+    if (acc->mpuDetectionResult.sensor != LSM6DSK320X_SPI) {
+        return false;
+    }
+
+    acc->initFn = lsm6dsv16xAccInit;
+    acc->readFn = lsm6dsv16xAccReadSPI;
+
+    return true;
+}
+#endif
 
 static void lsm6dsv16xGyroInit(gyroDev_t *gyro)
 {
@@ -960,8 +991,10 @@ static void lsm6dsv16xGyroInit(gyroDev_t *gyro)
     // Wait for the device to be ready
     while (spiReadRegMsk(dev, LSM6DSV_CTRL3) & LSM6DSV_CTRL3_SW_RESET) {}
 
-    // Wait for device to stabilize after reset (datasheet says gyro needs 30ms turn-on time)
-    delay(35);
+    // Wait for device to stabilize after reset
+    // LSM6DSV16X datasheet: gyro turn-on time = 30ms
+    // LSM6DSK320X datasheet: gyro turn-on time = 40ms
+    delay(45);
 
     // Autoincrement register address when doing block SPI reads and update continuously
     spiWriteReg(dev, LSM6DSV_CTRL3, LSM6DSV_CTRL3_IF_INC | LSM6DSV_CTRL3_BDU);
@@ -982,19 +1015,28 @@ static void lsm6dsv16xGyroInit(gyroDev_t *gyro)
     // CTRL1 = (OP_MODE_XL << 4) | ODR_XL = (1 << 4) | 9 = 0x19
     spiWriteReg(dev, LSM6DSV_CTRL1, 0x19);
 
+    // Configure gyro full-scale and LPF before enabling gyro output data.
+    // DSK320X requires FS_G configuration while gyro is in power-down.
+    uint8_t ctrl6Val = LSM6DSV_ENCODE_BITS(lsm6dsv16xLPF1BandwidthOptions[gyroConfig()->gyro_hardware_lpf],
+                                           LSM6DSV_CTRL6_LPF1_G_BW_MASK,
+                                           LSM6DSV_CTRL6_LPF1_G_BW_SHIFT) |
+                       LSM6DSV_ENCODE_BITS(LSM6DSV_CTRL6_FS_G_2000DPS,
+                                           LSM6DSV_CTRL6_FS_G_MASK,
+                                           LSM6DSV_CTRL6_FS_G_SHIFT);
+
+#ifdef USE_ACCGYRO_LSM6DSK320X
+    // LSM6DSK320X CTRL6 bit 3 must be set to 1 for correct operation (datasheet Table 64).
+    // FS_G is only 3 bits [2:0] on the DSK320X, unlike DSV16X where it is 4 bits [3:0].
+    if (gyro->mpuDetectionResult.sensor == LSM6DSK320X_SPI) {
+        ctrl6Val |= 0x08;
+    }
+#endif
+
+    spiWriteReg(dev, LSM6DSV_CTRL6, ctrl6Val);
+
     // Configure gyroscope: HIGH_ACCURACY mode + 8kHz ODR in single write
     // CTRL2 = (OP_MODE_G << 4) | ODR_G = (1 << 4) | 12 = 0x1C
     spiWriteReg(dev, LSM6DSV_CTRL2, 0x1C);
-
-    // Enable 2000 deg/s sensitivity and selected LPF1 filter setting
-    // Set the LPF1 filter bandwidth
-    spiWriteReg(dev, LSM6DSV_CTRL6,
-                LSM6DSV_ENCODE_BITS(lsm6dsv16xLPF1BandwidthOptions[gyroConfig()->gyro_hardware_lpf],
-                                    LSM6DSV_CTRL6_LPF1_G_BW_MASK,
-                                    LSM6DSV_CTRL6_LPF1_G_BW_SHIFT) |
-                LSM6DSV_ENCODE_BITS(LSM6DSV_CTRL6_FS_G_2000DPS,
-                                    LSM6DSV_CTRL6_FS_G_MASK,
-                                    LSM6DSV_CTRL6_FS_G_SHIFT));
 
     // Enable the gyro digital LPF1 filter
     spiWriteReg(dev, LSM6DSV_CTRL7, LSM6DSV_CTRL7_LPF1_G_EN);
@@ -1089,6 +1131,7 @@ static FAST_CODE bool lsm6dsv16xGyroReadSPI(gyroDev_t *gyro)
     return true;
 }
 
+#ifdef USE_ACCGYRO_LSM6DSV16X
 bool lsm6dsv16xSpiGyroDetect(gyroDev_t *gyro)
 {
     if (gyro->mpuDetectionResult.sensor != LSM6DSV16X_SPI) {
@@ -1100,4 +1143,19 @@ bool lsm6dsv16xSpiGyroDetect(gyroDev_t *gyro)
 
     return true;
 }
-#endif // USE_ACCGYRO_LSM6DSV16X
+#endif
+
+#ifdef USE_ACCGYRO_LSM6DSK320X
+bool lsm6dsk320xSpiGyroDetect(gyroDev_t *gyro)
+{
+    if (gyro->mpuDetectionResult.sensor != LSM6DSK320X_SPI) {
+        return false;
+    }
+
+    gyro->initFn = lsm6dsv16xGyroInit;
+    gyro->readFn = lsm6dsv16xGyroReadSPI;
+
+    return true;
+}
+#endif
+#endif // USE_ACCGYRO_LSM6DSV16X || USE_ACCGYRO_LSM6DSK320X
