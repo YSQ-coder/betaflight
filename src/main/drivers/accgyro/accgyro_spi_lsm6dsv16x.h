@@ -38,4 +38,8 @@ bool lsm6dsv16xSpiGyroDetect(gyroDev_t *gyro);
 uint8_t lsm6dsk320xSpiDetect(const extDevice_t *dev);
 bool lsm6dsk320xSpiAccDetect(accDev_t *acc);
 bool lsm6dsk320xSpiGyroDetect(gyroDev_t *gyro);
+
+#if defined(USE_IMU_LSM6DSK320X_SFLP_FIFO_ATT)
+bool lsm6dsk320xSflpReadQuat(const gyroDev_t *gyro, float *w, float *x, float *y, float *z);
+#endif
 #endif

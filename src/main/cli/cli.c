@@ -60,6 +60,9 @@ bool cliMode = false;
 #include "config/simplified_tuning.h"
 
 #include "drivers/accgyro/accgyro.h"
+#if defined(USE_IMU_LSM6DSK320X_SFLP_FIFO_ATT) && defined(USE_ACCGYRO_LSM6DSK320X)
+#include "drivers/accgyro/accgyro_spi_lsm6dsv16x.h"
+#endif
 #include "drivers/adc.h"
 #include "drivers/buf_writer.h"
 #include "drivers/bus_i2c.h"
@@ -4911,6 +4914,200 @@ static void cliStatus(const char *cmdName, char *cmdline)
     cliPrintLinefeed();
 }
 
+static void cliImuDebug(const char *cmdName, char *cmdline)
+{
+    UNUSED(cmdName);
+    UNUSED(cmdline);
+
+    cliPrintLinef("IMU solver: %s", imuIsUsingSflpAttitude() ? "SFLP" : "Mahony");
+    cliPrintLinef("SFLP available: %s", imuIsSflpAttitudeAvailable() ? "YES" : "NO");
+    cliPrintLinef("SFLP level cal: %s", imuIsSflpLevelCalibrationActive() ? "ACTIVE" : "IDLE");
+    cliPrintLinef("SFLP level valid: %s", imuIsSflpLevelCalibrationValid() ? "YES" : "NO");
+    cliPrintLinef("SFLP read fails: %u", (unsigned)imuGetSflpConsecutiveReadFails());
+    const uint32_t sflpEstHzTenths = (uint32_t)lrintf(imuGetSflpEstimatedNewFrameRateHz() * 10.0f);
+    cliPrintLinef("SFLP read stats: calls=%u ok=%u estNew=%u estHz=%u.%u distinctQuat=%u",
+        (unsigned)imuGetSflpReadCallCount(),
+        (unsigned)imuGetSflpReadOkCount(),
+        (unsigned)imuGetSflpEstimatedNewFrameCount(),
+        (unsigned)(sflpEstHzTenths / 10),
+        (unsigned)(sflpEstHzTenths % 10),
+        (unsigned)imuGetSflpDistinctQuatCount());
+    cliPrintLinef("SFLP attitude: sRPY=%d/%d/%d",
+        attitude.values.roll, attitude.values.pitch, attitude.values.yaw);
+
+#if defined(USE_IMU_LSM6DSK320X_SFLP_FIFO_ATT) && defined(USE_ACCGYRO_LSM6DSK320X)
+    const gyroDev_t *gyroDev = gyroActiveDev();
+    if (!gyroDev || gyroDev->mpuDetectionResult.sensor != LSM6DSK320X_SPI) {
+        cliPrintLine("LSM6DSK320X regs: inactive");
+        return;
+    }
+
+    int gyroIndex = -1;
+    for (int i = 0; i < GYRO_COUNT; i++) {
+        if (&gyro.gyroSensor[i].gyroDev == gyroDev) {
+            gyroIndex = i;
+            break;
+        }
+    }
+    int configAlign = -1;
+    if (gyroIndex >= 0) {
+        configAlign = (int)gyroDeviceConfig(gyroIndex)->alignment;
+    }
+    cliPrintLinef("SFLP align dbg: gyroDevAlign=%d configAlign=%d gyroIndex=%d",
+        (int)gyroDev->gyroAlign, configAlign, gyroIndex);
+
+    const extDevice_t *dev = &gyroDev->dev;
+
+    enum {
+        LSM6DSV_FUNC_CFG_ACCESS = 0x01,
+        LSM6DSV_PAGE_SEL = 0x02,
+        LSM6DSV_FIFO_CTRL3 = 0x09,
+        LSM6DSV_FIFO_CTRL4 = 0x0A,
+        LSM6DSV_FIFO_STATUS1 = 0x1B,
+        LSM6DSV_FIFO_STATUS2 = 0x1C,
+        LSM6DSV_EMB_FUNC_EN_A = 0x04,
+        LSM6DSV_EMB_FUNC_EN_B = 0x05,
+        LSM6DSV_EMB_FUNC_EXEC_STATUS = 0x07,
+        LSM6DSV_EMB_FUNC_CFG = 0x63,
+        LSM6DSV_EMB_FUNC_SRC = 0x64,
+        LSM6DSV_EMB_FUNC_INIT_A = 0x66,
+        LSM6DSV_EMB_FUNC_FIFO_EN_A = 0x44,
+        LSM6DSV_SFLP_ODR = 0x5E,
+        LSM6DSV_EMB_FUNC_SENSOR_CONV_EN = 0x6E,
+        LSM6DSV_CTRL1 = 0x10,
+        LSM6DSV_CTRL2 = 0x11,
+        LSM6DSV_SFLP_QUATW_L = 0x2A,
+        LSM6DSV_SFLP_QUATX_L = 0x2C,
+        LSM6DSV_SFLP_QUATY_L = 0x2E,
+        LSM6DSV_SFLP_QUATZ_L = 0x30,
+        LSM6DSV_EMB_ACCESS_EN = 0x80,
+        LSM6DSV_PAGE_SEL_DEFAULT = 0x01,
+    };
+
+    const uint8_t ctrl1 = spiReadRegMsk(dev, LSM6DSV_CTRL1);
+    const uint8_t ctrl2 = spiReadRegMsk(dev, LSM6DSV_CTRL2);
+    // On DSK320X, EMB_FUNC_CFG is on main page address 0x63.
+    const uint8_t embFuncCfg = spiReadRegMsk(dev, LSM6DSV_EMB_FUNC_CFG);
+    const uint8_t fifoStatus1 = spiReadRegMsk(dev, LSM6DSV_FIFO_STATUS1);
+    const uint8_t fifoStatus2 = spiReadRegMsk(dev, LSM6DSV_FIFO_STATUS2);
+    const uint8_t fifoCtrl3 = spiReadRegMsk(dev, LSM6DSV_FIFO_CTRL3);
+    const uint8_t fifoCtrl4 = spiReadRegMsk(dev, LSM6DSV_FIFO_CTRL4);
+    const uint16_t fifoWords = (uint16_t)fifoStatus1 | ((uint16_t)(fifoStatus2 & 0x01) << 8);
+    const uint8_t fifoMode = fifoCtrl4 & 0x07;
+
+    spiWriteReg(dev, LSM6DSV_FUNC_CFG_ACCESS, LSM6DSV_EMB_ACCESS_EN);
+    spiWriteReg(dev, LSM6DSV_PAGE_SEL, LSM6DSV_PAGE_SEL_DEFAULT);
+    const uint8_t pageSel = spiReadRegMsk(dev, LSM6DSV_PAGE_SEL);
+    const uint8_t embFuncEnA = spiReadRegMsk(dev, LSM6DSV_EMB_FUNC_EN_A);
+    const uint8_t embFuncEnB = spiReadRegMsk(dev, LSM6DSV_EMB_FUNC_EN_B);
+    const uint8_t embFuncExecStatus = spiReadRegMsk(dev, LSM6DSV_EMB_FUNC_EXEC_STATUS);
+    const uint8_t embFuncSrc = spiReadRegMsk(dev, LSM6DSV_EMB_FUNC_SRC);
+    const uint8_t embFuncInitA = spiReadRegMsk(dev, LSM6DSV_EMB_FUNC_INIT_A);
+    const uint8_t embFuncFifoEnA = spiReadRegMsk(dev, LSM6DSV_EMB_FUNC_FIFO_EN_A);
+    const uint8_t sflpOdr = spiReadRegMsk(dev, LSM6DSV_SFLP_ODR);
+    const uint8_t embFuncSensorConvEn = spiReadRegMsk(dev, LSM6DSV_EMB_FUNC_SENSOR_CONV_EN);
+    const uint16_t sflpQuatW = (uint16_t)spiReadRegMsk(dev, LSM6DSV_SFLP_QUATW_L) | ((uint16_t)spiReadRegMsk(dev, LSM6DSV_SFLP_QUATW_L + 1) << 8);
+    const uint16_t sflpQuatX = (uint16_t)spiReadRegMsk(dev, LSM6DSV_SFLP_QUATX_L) | ((uint16_t)spiReadRegMsk(dev, LSM6DSV_SFLP_QUATX_L + 1) << 8);
+    const uint16_t sflpQuatY = (uint16_t)spiReadRegMsk(dev, LSM6DSV_SFLP_QUATY_L) | ((uint16_t)spiReadRegMsk(dev, LSM6DSV_SFLP_QUATY_L + 1) << 8);
+    const uint16_t sflpQuatZ = (uint16_t)spiReadRegMsk(dev, LSM6DSV_SFLP_QUATZ_L) | ((uint16_t)spiReadRegMsk(dev, LSM6DSV_SFLP_QUATZ_L + 1) << 8);
+    // Raw byte dump of embedded page 0x18-0x39 (gbias, gravity, quat, gbias_init)
+    uint8_t embDump[34];
+    for (int i = 0; i < 34; i++) {
+        embDump[i] = spiReadRegMsk(dev, 0x18 + i);
+    }
+    spiWriteReg(dev, LSM6DSV_FUNC_CFG_ACCESS, 0x00);
+
+    const uint8_t sflpGameOdrCode = (sflpOdr >> 3) & 0x07;
+    const uint8_t sflpOdrFixed = sflpOdr & 0xC7;
+
+    cliPrintLinef("FIFO_STATUS1/2: 0x%02X 0x%02X (words=%u, mode=%u, wtm=%u ovr=%u full=%u latched=%u)",
+        fifoStatus1, fifoStatus2, (unsigned)fifoWords, (unsigned)fifoMode,
+        (unsigned)((fifoStatus2 >> 7) & 0x1), (unsigned)((fifoStatus2 >> 6) & 0x1),
+        (unsigned)((fifoStatus2 >> 5) & 0x1), (unsigned)((fifoStatus2 >> 3) & 0x1));
+    cliPrintLinef("CTRL1/CTRL2: 0x%02X 0x%02X", ctrl1, ctrl2);
+    cliPrintLinef("FIFO_CTRL3/4: 0x%02X 0x%02X", fifoCtrl3, fifoCtrl4);
+    cliPrintLinef("PAGE_SEL: 0x%02X", pageSel);
+    cliPrintLinef("EMB_FUNC_CFG/EXEC_STATUS: 0x%02X 0x%02X (disable=%u exec_ovr=%u endop=%u)",
+        embFuncCfg, embFuncExecStatus,
+        (unsigned)((embFuncCfg >> 3) & 0x1), (unsigned)((embFuncExecStatus >> 1) & 0x1), (unsigned)(embFuncExecStatus & 0x1));
+    cliPrintLinef("EMB_FUNC_SRC: 0x%02X", embFuncSrc);
+    cliPrintLinef("EMB_FUNC_EN_A/EN_B/INIT_A/FIFO_EN_A: 0x%02X 0x%02X 0x%02X 0x%02X (game_en=%u game_fifo=%u grav_fifo=%u gbias_fifo=%u)",
+        embFuncEnA, embFuncEnB, embFuncInitA, embFuncFifoEnA,
+        (unsigned)((embFuncEnA >> 1) & 0x1),
+        (unsigned)((embFuncFifoEnA >> 1) & 0x1),
+        (unsigned)((embFuncFifoEnA >> 4) & 0x1),
+        (unsigned)((embFuncFifoEnA >> 5) & 0x1));
+    cliPrintLinef("EMB_FUNC_SENSOR_CONV_EN: 0x%02X", embFuncSensorConvEn);
+    cliPrintLinef("SFLP_ODR: 0x%02X (game_odr_code=%u fixed=0x%02X)",
+        sflpOdr, (unsigned)sflpGameOdrCode, sflpOdrFixed);
+    cliPrintLinef("SFLP_QUAT W/X/Y/Z raw: 0x%04X 0x%04X 0x%04X 0x%04X",
+        (unsigned)sflpQuatW, (unsigned)sflpQuatX, (unsigned)sflpQuatY, (unsigned)sflpQuatZ);
+    // Dump: 0x18-0x1D=gbias, 0x1E-0x23=gravity, 0x24-0x29=gap, 0x2A-0x31=quat, 0x32-0x39=gbias_init
+    cliPrint("EMB 0x18-0x1D gbias:");
+    for (int i = 0; i < 6; i++) cliPrintf(" %02X", embDump[i]);
+    cliPrintLinefeed();
+    cliPrint("EMB 0x1E-0x23 grav :");
+    for (int i = 6; i < 12; i++) cliPrintf(" %02X", embDump[i]);
+    cliPrintLinefeed();
+    cliPrint("EMB 0x24-0x29 gap  :");
+    for (int i = 12; i < 18; i++) cliPrintf(" %02X", embDump[i]);
+    cliPrintLinefeed();
+    cliPrint("EMB 0x2A-0x31 quat :");
+    for (int i = 18; i < 26; i++) cliPrintf(" %02X", embDump[i]);
+    cliPrintLinefeed();
+    cliPrint("EMB 0x32-0x39 binit:");
+    for (int i = 26; i < 34; i++) cliPrintf(" %02X", embDump[i]);
+    cliPrintLinefeed();
+
+    float drvW = 0.0f;
+    float drvX = 0.0f;
+    float drvY = 0.0f;
+    float drvZ = 0.0f;
+    const bool drvReadOk = lsm6dsk320xSflpReadQuat(gyroDev, &drvW, &drvX, &drvY, &drvZ);
+    const int32_t drvWx1e4 = lrintf(drvW * 10000.0f);
+    const int32_t drvXx1e4 = lrintf(drvX * 10000.0f);
+    const int32_t drvYx1e4 = lrintf(drvY * 10000.0f);
+    const int32_t drvZx1e4 = lrintf(drvZ * 10000.0f);
+    cliPrintLinef("SFLP_DRV read: %s quat(x1e4)=%ld %ld %ld %ld",
+        drvReadOk ? "OK" : "FAIL",
+        (long)drvWx1e4, (long)drvXx1e4, (long)drvYx1e4, (long)drvZx1e4);
+
+    cliPrintLinef("SFLP read fails: %u", (unsigned)imuGetSflpConsecutiveReadFails());
+
+    // Read up to 20 FIFO words, show tags and first SFLP game rotation data
+    {
+        enum {
+            FIFO_TAG_REG = 0x78,
+            FIFO_DATA_X_L = 0x79,
+        };
+        bool foundSflp = false;
+        cliPrint("FIFO tags (first 20):");
+        for (int i = 0; i < 20; i++) {
+            uint8_t tag = spiReadRegMsk(dev, FIFO_TAG_REG);
+            uint8_t sensor = (tag >> 3) & 0x1F;
+            cliPrintf(" %02X", sensor);
+            if (sensor == 0x13 && !foundSflp) {
+                // Read SFLP game rotation: 3 half-precision X, Y, Z
+                uint8_t d[6];
+                for (int j = 0; j < 6; j++) {
+                    d[j] = spiReadRegMsk(dev, FIFO_DATA_X_L + j);
+                }
+                uint16_t fx = (uint16_t)d[1] << 8 | d[0];
+                uint16_t fy = (uint16_t)d[3] << 8 | d[2];
+                uint16_t fz = (uint16_t)d[5] << 8 | d[4];
+                cliPrintLinefeed();
+                cliPrintLinef("FIFO_SFLP X/Y/Z raw: 0x%04X 0x%04X 0x%04X", fx, fy, fz);
+                foundSflp = true;
+            }
+        }
+        cliPrintLinefeed();
+        if (!foundSflp) {
+            cliPrintLinef("No SFLP (0x13) tag found in FIFO");
+        }
+    }
+#endif
+}
+
 static void cliTasks(const char *cmdName, char *cmdline)
 {
     UNUSED(cmdName);
@@ -6637,6 +6834,7 @@ const clicmd_t cmdTable[] = {
 #if defined(USE_GYRO_REGISTER_DUMP) && !defined(SIMULATOR_BUILD)
     CLI_COMMAND_DEF("gyroregisters", "dump gyro config registers contents", NULL, cliDumpGyroRegisters),
 #endif
+    CLI_COMMAND_DEF("imudebug", "show IMU solver runtime diagnostics", NULL, cliImuDebug),
     CLI_COMMAND_DEF("help", "display command help", "[search string]", cliHelp),
 #ifdef USE_LED_STRIP_STATUS_MODE
         CLI_COMMAND_DEF("led", "configure leds", NULL, cliLed),

@@ -21,6 +21,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include "platform.h"
 
@@ -28,6 +29,8 @@
 
 #include "accgyro_spi_lsm6dsv16x.h"
 
+#include "drivers/exti.h"
+#include "drivers/io.h"
 #include "drivers/time.h"
 #include "sensors/gyro.h"
 
@@ -108,7 +111,7 @@
 #define LSM6DSV_FIFO_CTRL3_BDR_GY_1920HZ                0x0a
 #define LSM6DSV_FIFO_CTRL3_BDR_GY_3840HZ                0x0b
 #define LSM6DSV_FIFO_CTRL3_BDR_GY_7680HZ                0x0c
-#define LSM6DSV_FIFO_CTRL3_BDR_XL_MASK                  0xff
+#define LSM6DSV_FIFO_CTRL3_BDR_XL_MASK                  0x0f
 #define LSM6DSV_FIFO_CTRL3_BDR_XL_SHIFT                 0
 #define LSM6DSV_FIFO_CTRL3_BDR_XL_1875HZ                0x01
 #define LSM6DSV_FIFO_CTRL3_BDR_XL_7_5HZ                 0x02
@@ -309,10 +312,13 @@
 #define LSM6DSV_CTRL5                       0x14
 #define LSM6DSV_CTRL5_BUS_ACT_SEL_MASK                  0x06
 #define LSM6DSV_CTRL5_BUS_ACT_SEL_SHIFT                 1
-#define LSM6DSV_CTRL5_BUS_ACT_SEL_2US                   0
-#define LSM6DSV_CTRL5_BUS_ACT_SEL_50US                  1
-#define LSM6DSV_CTRL5_BUS_ACT_SEL_1US                   2
-#define LSM6DSV_CTRL5_BUS_ACT_SEL_25US                  3
+#define LSM6DSV_CTRL5_BUS_ACT_SEL_2US_DSV16X            0
+#define LSM6DSV_CTRL5_BUS_ACT_SEL_50US_DSV16X           1
+#define LSM6DSV_CTRL5_BUS_ACT_SEL_50US_DSK320X          0
+#define LSM6DSV_CTRL5_BUS_ACT_SEL_2US_DSK320X           1
+#define LSM6DSV_CTRL5_BUS_ACT_SEL_1MS                   2
+#define LSM6DSV_CTRL5_BUS_ACT_SEL_25MS_DSV16X           3
+#define LSM6DSV_CTRL5_BUS_ACT_SEL_50MS_DSK320X          3
 #define LSM6DSV_CTRL5_INT_EN_I3C                        0x01
 
 // Control register 6 (R/W)
@@ -348,7 +354,8 @@
 #define LSM6DSV_CTRL6_FS_G_500DPS                       0x02
 #define LSM6DSV_CTRL6_FS_G_1000DPS                      0x03
 #define LSM6DSV_CTRL6_FS_G_2000DPS                      0x04
-#define LSM6DSV_CTRL6_FS_G_4000DPS                      0xc0
+#define LSM6DSV_CTRL6_FS_G_4000DPS_DSV16X               0x0c
+#define LSM6DSV_CTRL6_FS_G_4000DPS_DSK320X              0x0d
 
 // Control register 7 (R/W)
 #define LSM6DSV_CTRL7                       0x16
@@ -743,6 +750,46 @@
 // UI / SPI2 shared register 5 (R/W)
 #define LSM6DSV_UI_SPI2_SHARED_5            0x6A
 
+// Embedded page selector (R/W) when LSM6DSV_FUNC_CFG_ACCESS is enabled
+#define LSM6DSV_PAGE_SEL                    0x02
+// Datasheet table "PAGE_SEL": low fixed bit must be 1 while selecting page 0.
+#define LSM6DSV_PAGE_SEL_DEFAULT                        0x01
+
+// Embedded functions enable register A (R/W) in embedded page
+#define LSM6DSV_EMB_FUNC_EN_A               0x04
+#define LSM6DSV_EMB_FUNC_EN_A_SFLP_GAME_EN              0x02
+// Embedded functions enable register B (R/W) in embedded page
+#define LSM6DSV_EMB_FUNC_EN_B               0x05
+
+// Embedded functions FIFO enable register A (R/W) in embedded page
+#define LSM6DSV_EMB_FUNC_FIFO_EN_A          0x44
+#define LSM6DSV_EMB_FUNC_FIFO_EN_A_SFLP_GBIAS_FIFO_EN   0x20
+#define LSM6DSV_EMB_FUNC_FIFO_EN_A_SFLP_GRAV_FIFO_EN    0x10
+#define LSM6DSV_EMB_FUNC_FIFO_EN_A_SFLP_GAME_FIFO_EN    0x02
+
+// Sensor fusion low-power ODR register (R/W) in embedded page
+#define LSM6DSV_SFLP_ODR                    0x5E
+#define LSM6DSV_SFLP_ODR_GAME_ODR_MASK                  0x38
+#define LSM6DSV_SFLP_ODR_GAME_ODR_SHIFT                 3
+#define LSM6DSV_SFLP_ODR_GAME_ODR_480HZ                 5
+#define LSM6DSV_SFLP_ODR_FIXED_BITS                     0x43
+
+// Embedded functions initialization register A (R/W) in embedded page
+#define LSM6DSV_EMB_FUNC_INIT_A             0x66
+#define LSM6DSV_EMB_FUNC_INIT_A_SFLP_GAME_INIT          0x02
+
+// Embedded functions execution status register (R) in embedded page
+#define LSM6DSV_EMB_FUNC_EXEC_STATUS        0x07
+#define LSM6DSV_EMB_FUNC_EXEC_STATUS_EXEC_OVR           0x02
+
+// SFLP quaternion output registers (R) in embedded page — DSK320X only
+#define LSM6DSV_SFLP_QUATW_L                0x2A
+// Contiguous 8 bytes: W_L(2A) W_H(2B) X_L(2C) X_H(2D) Y_L(2E) Y_H(2F) Z_L(30) Z_H(31)
+
+// Embedded functions sensor conversion enable register (R/W) in embedded page
+#define LSM6DSV_EMB_FUNC_SENSOR_CONV_EN     0x6E
+#define LSM6DSV_EMB_FUNC_SENSOR_CONV_EN_MASK             0x0F
+
 // Gyroscope EIS channel control register (R/W)
 #define LSM6DSV_CTRL_EIS                    0x6B
 #define LSM6DSV_CTRL_EIS_ODR_G_EIS_MASK                     0xc0
@@ -811,6 +858,8 @@
 
 // FIFO tag register (R)
 #define LSM6DSV_FIFO_DATA_OUT_TAG           0x78
+// FIFO TAG mapping follows the DSV/DSK family convention:
+// TAG_SENSOR[4:0] in bits [7:3], TAG_CNT[1:0] in bits [2:1], bit0 reserved.
 #define LSM6DSV_FIFO_DATA_OUT_TAG_SENSOR_MASK               0xf8
 #define LSM6DSV_FIFO_DATA_OUT_TAG_SENSOR_SHIFT              3
 #define LSM6DSV_FIFO_DATA_OUT_TAG_SENSOR_FIFO_EMPTY                 0x00
@@ -841,8 +890,8 @@
 #define LSM6DSV_FIFO_DATA_OUT_TAG_SENSOR_FIFO_MLC_FEATURE           0x1c
 #define LSM6DSV_FIFO_DATA_OUT_TAG_SENSOR_FIFO_ACC_DUALC             0x1d
 #define LSM6DSV_FIFO_DATA_OUT_TAG_SENSOR_FIFO_ENHANCED_EIS_GYRO     0x1e
-#define LSM6DSV_FIFO_DATA_OUT_TAG_CNT_MASK                  0x07
-#define LSM6DSV_FIFO_DATA_OUT_TAG_CNT_SHIFT                 0
+#define LSM6DSV_FIFO_DATA_OUT_TAG_CNT_MASK                  0x06
+#define LSM6DSV_FIFO_DATA_OUT_TAG_CNT_SHIFT                 1
 
 // FIFO data output X (R)
 #define LSM6DSV_FIFO_DATA_OUT_X_L           0x79
@@ -892,6 +941,109 @@ static inline int16_t lsm6dsv16xDecodeSample(const uint8_t *buf)
 {
     return (int16_t)((((uint16_t)buf[1]) << 8) | buf[0]);
 }
+
+#if defined(USE_ACCGYRO_LSM6DSK320X) && defined(USE_IMU_LSM6DSK320X_SFLP_FIFO_ATT)
+static void lsm6dsk320xSetEmbeddedAccess(const extDevice_t *dev, bool enable)
+{
+    if (enable) {
+        spiWriteReg(dev, LSM6DSV_FUNC_CFG_ACCESS, LSM6DSV_EMB_FUNC_REG_ACCESS_EMB_FUNC_REG_ACCESS);
+        spiWriteReg(dev, LSM6DSV_PAGE_SEL, LSM6DSV_PAGE_SEL_DEFAULT);
+    } else {
+        spiWriteReg(dev, LSM6DSV_FUNC_CFG_ACCESS, 0x00);
+    }
+}
+
+static float lsm6dsk320xFp16ToFloat(uint16_t bits)
+{
+    const int sign = (bits >> 15) & 0x1;
+    const int exponent = (bits >> 10) & 0x1f;
+    const int fraction = bits & 0x03ff;
+
+    float value;
+    if (exponent == 0) {
+        if (fraction == 0) {
+            value = 0.0f;
+        } else {
+            // Subnormal binary16: sign * 2^-14 * (fraction / 2^10)
+            value = ldexpf((float)fraction, -24);
+        }
+    } else if (exponent == 0x1f) {
+        value = (fraction == 0) ? INFINITY : NAN;
+    } else {
+        // Normalized binary16: sign * 2^(exp-15) * (1 + fraction / 2^10)
+        value = ldexpf(1.0f + ((float)fraction / 1024.0f), exponent - 15);
+    }
+
+    return sign ? -value : value;
+}
+
+static void lsm6dsk320xSflpConfigure(const extDevice_t *dev)
+{
+    // On DSK320X, EMB_FUNC_CFG is on the main register page.
+    uint8_t embFuncCfg = spiReadRegMsk(dev, LSM6DSV_EMB_FUNC_CFG);
+    embFuncCfg &= (uint8_t)~LSM6DSV_EMB_FUNC_CFG_EMB_FUNC_DISABLE;
+    spiWriteReg(dev, LSM6DSV_EMB_FUNC_CFG, embFuncCfg);
+
+    lsm6dsk320xSetEmbeddedAccess(dev, true);
+
+    // Configure SFLP ODR before enabling the game engine.
+    spiWriteReg(dev, LSM6DSV_SFLP_ODR,
+        LSM6DSV_SFLP_ODR_FIXED_BITS |
+        LSM6DSV_ENCODE_BITS(LSM6DSV_SFLP_ODR_GAME_ODR_480HZ,
+            LSM6DSV_SFLP_ODR_GAME_ODR_MASK,
+            LSM6DSV_SFLP_ODR_GAME_ODR_SHIFT));
+
+    // Enable SFLP game engine.
+    // NOTE: SFLP FIFO batching does not work on DSK320X rev 0.1 — quaternion
+    // is read from the embedded page registers instead (SFLP_QUAT{W,X,Y,Z}).
+    spiWriteReg(dev, LSM6DSV_EMB_FUNC_EN_A, LSM6DSV_EMB_FUNC_EN_A_SFLP_GAME_EN);
+
+    // DSK320X requires SFLP_GAME_INIT pulse to start the fusion algorithm
+    // (unlike DSV16X where just setting SFLP_GAME_EN is sufficient).
+    spiWriteReg(dev, LSM6DSV_EMB_FUNC_INIT_A, 0x00);
+    spiWriteReg(dev, LSM6DSV_EMB_FUNC_INIT_A, LSM6DSV_EMB_FUNC_INIT_A_SFLP_GAME_INIT);
+    delay(1);
+    spiWriteReg(dev, LSM6DSV_EMB_FUNC_INIT_A, 0x00);
+
+    lsm6dsk320xSetEmbeddedAccess(dev, false);
+}
+
+bool lsm6dsk320xSflpReadQuat(const gyroDev_t *gyro, float *w, float *x, float *y, float *z)
+{
+    const extDevice_t *dev = &gyro->dev;
+
+    // Read all 4 quaternion components from embedded page registers.
+    // NOTE: DSK320X rev 0.1 SFLP FIFO batching does not work, so we read
+    // directly from the embedded page.
+    const IO_t mpuIntIO = IOGetByTag(gyro->mpuIntExtiTag);
+    EXTIDisable(mpuIntIO);
+
+    lsm6dsk320xSetEmbeddedAccess(dev, true);
+
+    uint8_t tx[9] = { LSM6DSV_SFLP_QUATW_L | 0x80 };
+    uint8_t rx[9];
+    memset(rx, 0, sizeof(rx));
+    spiReadWriteBuf(dev, tx, rx, sizeof(tx));
+
+    lsm6dsk320xSetEmbeddedAccess(dev, false);
+
+    EXTIEnable(mpuIntIO);
+
+    const uint8_t *buf = &rx[1];
+
+    const uint16_t rawW = ((uint16_t)buf[1] << 8) | buf[0];
+    const uint16_t rawX = ((uint16_t)buf[3] << 8) | buf[2];
+    const uint16_t rawY = ((uint16_t)buf[5] << 8) | buf[4];
+    const uint16_t rawZ = ((uint16_t)buf[7] << 8) | buf[6];
+
+    *w = lsm6dsk320xFp16ToFloat(rawW);
+    *x = lsm6dsk320xFp16ToFloat(rawX);
+    *y = lsm6dsk320xFp16ToFloat(rawY);
+    *z = lsm6dsk320xFp16ToFloat(rawZ);
+
+    return isfinite(*w) && isfinite(*x) && isfinite(*y) && isfinite(*z);
+}
+#endif
 
 static FAST_CODE bool lsm6dsv16xAccReadSPI(accDev_t *acc)
 {
@@ -985,6 +1137,15 @@ static void lsm6dsv16xGyroInit(gyroDev_t *gyro)
 
     spiSetClkDivisor(dev, spiCalculateDivider(LSM6DSV16X_MAX_SPI_CLK_HZ));
 
+#ifdef USE_ACCGYRO_LSM6DSK320X
+    // DSK320X: Use SW_POR (global reset) matching ST example.
+    // SW_POR resets SFLP and embedded function internal state that SW_RESET doesn't.
+    if (gyro->mpuDetectionResult.sensor == LSM6DSK320X_SPI) {
+        spiWriteReg(dev, LSM6DSV_FUNC_CFG_ACCESS, LSM6DSV_EMB_FUNC_REG_ACCESS_SW_POR);
+        delay(30);
+    }
+#endif
+
     // Perform a software reset
     spiWriteReg(dev, LSM6DSV_CTRL3, LSM6DSV_CTRL3_SW_RESET);
 
@@ -999,17 +1160,17 @@ static void lsm6dsv16xGyroInit(gyroDev_t *gyro)
     // Autoincrement register address when doing block SPI reads and update continuously
     spiWriteReg(dev, LSM6DSV_CTRL3, LSM6DSV_CTRL3_IF_INC | LSM6DSV_CTRL3_BDU);
 
-    // Select high-accuracy ODR mode 1
-    spiWriteReg(dev, LSM6DSV_HAODR_CFG,
-                LSM6DSV_ENCODE_BITS(LSM6DSV_HAODR_MODE1,
-                                    LSM6DSV_HAODR_CFG_HAODR_SEL_MASK,
-                                    LSM6DSV_HAODR_CFG_HAODR_SEL_SHIFT));
-
     // Set accelerometer: 16G full scale
     spiWriteReg(dev, LSM6DSV_CTRL8,
                 LSM6DSV_ENCODE_BITS(LSM6DSV_CTRL8_FS_XL_16G,
                                     LSM6DSV_CTRL8_FS_XL_MASK,
                                     LSM6DSV_CTRL8_FS_XL_SHIFT));
+
+    // Select high-accuracy ODR mode 1
+    spiWriteReg(dev, LSM6DSV_HAODR_CFG,
+                LSM6DSV_ENCODE_BITS(LSM6DSV_HAODR_MODE1,
+                                    LSM6DSV_HAODR_CFG_HAODR_SEL_MASK,
+                                    LSM6DSV_HAODR_CFG_HAODR_SEL_SHIFT));
 
     // Configure accelerometer: HIGH_ACCURACY mode + 1kHz ODR in single write
     // CTRL1 = (OP_MODE_XL << 4) | ODR_XL = (1 << 4) | 9 = 0x19
@@ -1049,6 +1210,12 @@ static void lsm6dsv16xGyroInit(gyroDev_t *gyro)
 
     // Enable the INT1 output to interrupt when new gyro data is ready
     spiWriteReg(dev, LSM6DSV_INT1_CTRL, LSM6DSV_INT1_CTRL_INT1_DRDY_G);
+
+#if defined(USE_ACCGYRO_LSM6DSK320X) && defined(USE_IMU_LSM6DSK320X_SFLP_FIFO_ATT)
+    if (gyro->mpuDetectionResult.sensor == LSM6DSK320X_SPI) {
+        lsm6dsk320xSflpConfigure(dev);
+    }
+#endif
 
     mpuGyroInit(gyro);
 }

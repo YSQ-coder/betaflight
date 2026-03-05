@@ -68,6 +68,15 @@ typedef struct imuConfig_s {
 
 PG_DECLARE(imuConfig_t, imuConfig);
 
+#if defined(USE_IMU_LSM6DSK320X_SFLP_FIFO_ATT) && defined(USE_ACCGYRO_LSM6DSK320X)
+typedef struct imuSflpConfig_s {
+    quaternion_t sflp_q_level;
+    uint8_t sflp_q_level_valid;
+} imuSflpConfig_t;
+
+PG_DECLARE(imuSflpConfig_t, imuSflpConfig);
+#endif
+
 typedef struct imuRuntimeConfig_s {
     float imuDcmKi;
     float imuDcmKp;
@@ -79,6 +88,18 @@ float getSinPitchAngle(void);
 float getCosTiltAngle(void);
 void getQuaternion(quaternion_t * q);
 void imuUpdateAttitude(timeUs_t currentTimeUs);
+void imuStartSflpLevelCalibration(void);
+void imuInvalidateSflpLevelCalibration(void);
+bool imuIsSflpLevelCalibrationActive(void);
+bool imuIsSflpLevelCalibrationValid(void);
+bool imuIsUsingSflpAttitude(void);
+bool imuIsSflpAttitudeAvailable(void);
+uint16_t imuGetSflpConsecutiveReadFails(void);
+uint32_t imuGetSflpReadCallCount(void);
+uint32_t imuGetSflpReadOkCount(void);
+uint32_t imuGetSflpEstimatedNewFrameCount(void);
+uint32_t imuGetSflpDistinctQuatCount(void);
+float imuGetSflpEstimatedNewFrameRateHz(void);
 
 void imuInit(void);
 

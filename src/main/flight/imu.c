@@ -47,11 +47,18 @@
 
 #include "scheduler/scheduler.h"
 
+#include "pg/gyrodev.h"
+
 #include "sensors/acceleration.h"
 #include "sensors/barometer.h"
 #include "sensors/compass.h"
 #include "sensors/gyro.h"
+#include "sensors/gyro_init.h"
 #include "sensors/sensors.h"
+
+#if defined(USE_IMU_LSM6DSK320X_SFLP_FIFO_ATT) && defined(USE_ACCGYRO_LSM6DSK320X)
+#include "drivers/accgyro/accgyro_spi_lsm6dsv16x.h"
+#endif
 
 #if defined(SIMULATOR_BUILD) && defined(SIMULATOR_MULTITHREAD)
 #include <stdio.h>
@@ -112,7 +119,49 @@ quaternion_t offset = QUATERNION_INITIALIZE;
 attitudeEulerAngles_t attitude = EULER_INITIALIZE;
 quaternion_t imuAttitudeQuaternion = QUATERNION_INITIALIZE;
 
+#if defined(USE_IMU_LSM6DSK320X_SFLP_FIFO_ATT) && defined(USE_ACCGYRO_LSM6DSK320X)
+#define SFLP_STARTUP_SETTLE_TIME_US 1500000
+#define SFLP_LEVEL_CAL_SAMPLES      256
+#define SFLP_MAX_READ_FAILS         50
+#define SFLP_GAME_FRAME_PERIOD_US   (1000000.0f / 480.0f)
+
+static quaternion_t sflpPrevQuat = QUATERNION_INITIALIZE;
+static bool sflpPrevQuatValid = false;
+
+static float sflpDeltaPsi = 0.0f;
+static float sflpDeltaPsiIntegral = 0.0f;
+static bool sflpAttitudeActiveLastCycle = false;
+static bool sflpGpsHeadingInitialized = false;
+static uint8_t sflpLastGpsUpdate = 0;
+static timeUs_t sflpStartTimeUs = 0;
+static timeUs_t sflpLastHeadingUpdateUs = 0;
+static uint16_t sflpConsecutiveReadFails = 0;
+static bool sflpWasArmed = false;
+static bool sflpHadGpsFix = false;
+
+static bool sflpLevelCalActive = false;
+static uint16_t sflpLevelCalSamplesRemaining = 0;
+static quaternion_t sflpLevelCalAccum = {.w = 0, .x = 0, .y = 0, .z = 0};
+static quaternion_t sflpLevelCalRef = QUATERNION_INITIALIZE;
+static bool sflpLevelCalRefValid = false;
+static quaternion_t sflpLevelCalDefaultLevel = QUATERNION_INITIALIZE;
+
+static uint32_t sflpReadCallCount = 0;
+static uint32_t sflpReadOkCount = 0;
+static uint32_t sflpEstimatedNewFrameCount = 0;
+static uint32_t sflpDistinctQuatCount = 0;
+static quaternion_t sflpLastRawQuat = QUATERNION_INITIALIZE;
+static bool sflpLastRawQuatValid = false;
+static timeUs_t sflpReadStatsStartUs = 0;
+static timeUs_t sflpLastReadOkUs = 0;
+static float sflpEstimatedFrameAccumulatorUs = 0.0f;
+#endif
+
 PG_REGISTER_WITH_RESET_TEMPLATE(imuConfig_t, imuConfig, PG_IMU_CONFIG, 3);
+
+#if defined(USE_IMU_LSM6DSK320X_SFLP_FIFO_ATT) && defined(USE_ACCGYRO_LSM6DSK320X)
+PG_REGISTER_WITH_RESET_TEMPLATE(imuSflpConfig_t, imuSflpConfig, PG_IMU_SFLP_CONFIG, 0);
+#endif
 
 #ifdef USE_RACE_PRO
 #define DEFAULT_SMALL_ANGLE 180
@@ -127,6 +176,13 @@ PG_RESET_TEMPLATE(imuConfig_t, imuConfig,
     .imu_process_denom = 2,
     .mag_declination = 0,
 );
+
+#if defined(USE_IMU_LSM6DSK320X_SFLP_FIFO_ATT) && defined(USE_ACCGYRO_LSM6DSK320X)
+PG_RESET_TEMPLATE(imuSflpConfig_t, imuSflpConfig,
+    .sflp_q_level = QUATERNION_INITIALIZE,
+    .sflp_q_level_valid = 0,
+);
+#endif
 
 static void imuQuaternionComputeProducts(quaternion_t *quat, quaternionProducts *quatProd)
 {
@@ -190,6 +246,35 @@ void imuInit(void)
 {
     canUseGPSHeading = false;
     imuComputeRotationMatrix();
+
+#if defined(USE_IMU_LSM6DSK320X_SFLP_FIFO_ATT) && defined(USE_ACCGYRO_LSM6DSK320X)
+    sflpPrevQuat = (quaternion_t)QUATERNION_INITIALIZE;
+    sflpPrevQuatValid = false;
+    sflpDeltaPsi = 0.0f;
+    sflpDeltaPsiIntegral = 0.0f;
+    sflpAttitudeActiveLastCycle = false;
+    sflpGpsHeadingInitialized = false;
+    sflpLastGpsUpdate = GPS_update;
+    sflpStartTimeUs = 0;
+    sflpLastHeadingUpdateUs = 0;
+    sflpConsecutiveReadFails = 0;
+    sflpWasArmed = false;
+    sflpHadGpsFix = false;
+    sflpLevelCalActive = false;
+    sflpLevelCalSamplesRemaining = 0;
+    sflpLevelCalAccum = (quaternion_t){.w = 0, .x = 0, .y = 0, .z = 0};
+    sflpLevelCalRef = (quaternion_t)QUATERNION_INITIALIZE;
+    sflpLevelCalRefValid = false;
+    sflpReadCallCount = 0;
+    sflpReadOkCount = 0;
+    sflpEstimatedNewFrameCount = 0;
+    sflpDistinctQuatCount = 0;
+    sflpLastRawQuat = (quaternion_t)QUATERNION_INITIALIZE;
+    sflpLastRawQuatValid = false;
+    sflpReadStatsStartUs = 0;
+    sflpLastReadOkUs = 0;
+    sflpEstimatedFrameAccumulatorUs = 0.0f;
+#endif
 
 #if defined(SIMULATOR_BUILD) && defined(SIMULATOR_MULTITHREAD)
     if (pthread_mutex_init(&imuUpdateLock, NULL) != 0) {
@@ -612,6 +697,64 @@ static void imuCalculateEstimatedAttitude(timeUs_t currentTimeUs)
     UNUSED(imuCalcGroundspeedGain);
 #endif
 }
+
+void imuStartSflpLevelCalibration(void)
+{
+}
+
+void imuInvalidateSflpLevelCalibration(void)
+{
+}
+
+bool imuIsSflpLevelCalibrationActive(void)
+{
+    return false;
+}
+
+bool imuIsSflpLevelCalibrationValid(void)
+{
+    return false;
+}
+
+bool imuIsUsingSflpAttitude(void)
+{
+    return false;
+}
+
+bool imuIsSflpAttitudeAvailable(void)
+{
+    return false;
+}
+
+uint16_t imuGetSflpConsecutiveReadFails(void)
+{
+    return 0;
+}
+
+uint32_t imuGetSflpReadCallCount(void)
+{
+    return 0;
+}
+
+uint32_t imuGetSflpReadOkCount(void)
+{
+    return 0;
+}
+
+uint32_t imuGetSflpEstimatedNewFrameCount(void)
+{
+    return 0;
+}
+
+uint32_t imuGetSflpDistinctQuatCount(void)
+{
+    return 0;
+}
+
+float imuGetSflpEstimatedNewFrameRateHz(void)
+{
+    return 0.0f;
+}
 #else
 
 #if defined(USE_GPS)
@@ -636,6 +779,642 @@ static void updateGpsHeadingUsable(float groundspeedGain, float imuCourseError, 
 }
 #endif
 
+#if defined(USE_IMU_LSM6DSK320X_SFLP_FIFO_ATT) && defined(USE_ACCGYRO_LSM6DSK320X)
+static float imuWrapPi(float angle)
+{
+    if (!isfinite(angle)) {
+        return 0.0f;
+    }
+
+    while (angle > M_PIf) {
+        angle -= (2.0f * M_PIf);
+    }
+    while (angle < -M_PIf) {
+        angle += (2.0f * M_PIf);
+    }
+    return angle;
+}
+
+static float imuQuaternionDot(const quaternion_t *a, const quaternion_t *b)
+{
+    return a->w * b->w + a->x * b->x + a->y * b->y + a->z * b->z;
+}
+
+static bool imuQuaternionNormalize(quaternion_t *quat)
+{
+    const float normSq = sq(quat->w) + sq(quat->x) + sq(quat->y) + sq(quat->z);
+    if (!isfinite(normSq) || normSq < 1e-12f) {
+        return false;
+    }
+
+    const float recipNorm = 1.0f / sqrtf(normSq);
+    quat->w *= recipNorm;
+    quat->x *= recipNorm;
+    quat->y *= recipNorm;
+    quat->z *= recipNorm;
+    return true;
+}
+
+static void imuQuaternionMultiplyConst(const quaternion_t *q1, const quaternion_t *q2, quaternion_t *result)
+{
+    result->w = q1->w * q2->w - q1->x * q2->x - q1->y * q2->y - q1->z * q2->z;
+    result->x = q1->w * q2->x + q1->x * q2->w + q1->y * q2->z - q1->z * q2->y;
+    result->y = q1->w * q2->y - q1->x * q2->z + q1->y * q2->w + q1->z * q2->x;
+    result->z = q1->w * q2->z + q1->x * q2->y - q1->y * q2->x + q1->z * q2->w;
+}
+
+static void imuQuaternionConjugate(const quaternion_t *input, quaternion_t *result)
+{
+    result->w = input->w;
+    result->x = -input->x;
+    result->y = -input->y;
+    result->z = -input->z;
+}
+
+static void imuQuaternionFromDeciDegrees(quaternion_t *quat, const sensorAlignment_t *rpy)
+{
+    const float roll = DECIDEGREES_TO_RADIANS(rpy->roll);
+    const float pitch = DECIDEGREES_TO_RADIANS(rpy->pitch);
+    const float yaw = DECIDEGREES_TO_RADIANS(rpy->yaw);
+
+    const float cosRoll = cos_approx(roll * 0.5f);
+    const float sinRoll = sin_approx(roll * 0.5f);
+    const float cosPitch = cos_approx(pitch * 0.5f);
+    const float sinPitch = sin_approx(pitch * 0.5f);
+    const float cosYaw = cos_approx(-yaw * 0.5f);
+    const float sinYaw = sin_approx(-yaw * 0.5f);
+
+    quat->w = cosRoll * cosPitch * cosYaw + sinRoll * sinPitch * sinYaw;
+    quat->x = sinRoll * cosPitch * cosYaw - cosRoll * sinPitch * sinYaw;
+    quat->y = cosRoll * sinPitch * cosYaw + sinRoll * cosPitch * sinYaw;
+    quat->z = cosRoll * cosPitch * sinYaw - sinRoll * sinPitch * cosYaw;
+    imuQuaternionNormalize(quat);
+}
+
+static bool imuSflpPathEnabled(void)
+{
+    const gyroDev_t *gyroDev = gyroActiveDev();
+    return gyroDev && (gyroDev->mpuDetectionResult.sensor == LSM6DSK320X_SPI);
+}
+
+static float imuSflpHeadingFromQuat(const quaternion_t *quat);
+
+static quaternion_t imuSflpDefaultLevelQuat(void)
+{
+    quaternion_t defaultLevel = QUATERNION_INITIALIZE;
+    sensorAlignment_t alignment = {
+        .roll = 0,
+        .pitch = 0,
+        .yaw = 0
+    };
+    bool hasAlignment = false;
+
+    // Prefer the runtime gyro alignment used by the active sensor path.
+    // This captures target-defined mount rotations even when config alignment is ALIGN_DEFAULT.
+    const gyroDev_t *activeGyro = gyroActiveDev();
+    if (activeGyro && activeGyro->gyroAlign != ALIGN_DEFAULT) {
+        if (activeGyro->gyroAlign != ALIGN_CUSTOM) {
+            buildAlignmentFromStandardAlignment(&alignment, activeGyro->gyroAlign);
+            hasAlignment = true;
+        }
+    }
+
+    if (!hasAlignment) {
+        int gyroIndex = -1;
+        if (activeGyro) {
+            for (int i = 0; i < GYRO_COUNT; i++) {
+                if (&gyro.gyroSensor[i].gyroDev == activeGyro) {
+                    gyroIndex = i;
+                    break;
+                }
+            }
+        }
+        if (gyroIndex < 0) {
+            gyroIndex = firstEnabledGyro();
+        }
+        if (gyroIndex < 0) {
+            return defaultLevel;
+        }
+
+        const gyroDeviceConfig_t *gyroCfg = gyroDeviceConfig(gyroIndex);
+        if (gyroCfg->alignment == ALIGN_CUSTOM) {
+            alignment = gyroCfg->customAlignment;
+        } else if (gyroCfg->alignment != ALIGN_DEFAULT) {
+            buildAlignmentFromStandardAlignment(&alignment, (sensor_align_e)gyroCfg->alignment);
+        }
+    }
+
+    imuQuaternionFromDeciDegrees(&defaultLevel, &alignment);
+    return defaultLevel;
+}
+
+static void imuSflpLevelCalibrationAccumulate(const quaternion_t *sflpQuat)
+{
+    if (!sflpLevelCalActive || !sflpLevelCalSamplesRemaining) {
+        return;
+    }
+
+    if (ARMING_FLAG(ARMED)) {
+        sflpLevelCalActive = false;
+        sflpLevelCalSamplesRemaining = 0;
+        return;
+    }
+
+    // Convert sensor attitude to body attitude using default mount alignment,
+    // then estimate only roll/pitch trim from this body attitude.
+    quaternion_t defaultLevelConj;
+    imuQuaternionConjugate(&sflpLevelCalDefaultLevel, &defaultLevelConj);
+
+    quaternion_t sample;
+    imuQuaternionMultiplyConst(sflpQuat, &defaultLevelConj, &sample);
+    if (!imuQuaternionNormalize(&sample)) {
+        return;
+    }
+
+    if (!sflpLevelCalRefValid) {
+        sflpLevelCalRef = sample;
+        sflpLevelCalRefValid = true;
+    } else if (imuQuaternionDot(&sample, &sflpLevelCalRef) < 0.0f) {
+        sample.w = -sample.w;
+        sample.x = -sample.x;
+        sample.y = -sample.y;
+        sample.z = -sample.z;
+    }
+
+    sflpLevelCalAccum.w += sample.w;
+    sflpLevelCalAccum.x += sample.x;
+    sflpLevelCalAccum.y += sample.y;
+    sflpLevelCalAccum.z += sample.z;
+    sflpLevelCalSamplesRemaining--;
+
+    if (!sflpLevelCalSamplesRemaining) {
+        quaternion_t bodyAtLevel = sflpLevelCalAccum;
+        if (imuQuaternionNormalize(&bodyAtLevel)) {
+            const float heading = imuSflpHeadingFromQuat(&bodyAtLevel);
+            const quaternion_t qYaw = {
+                .w = cos_approx(-heading * 0.5f),
+                .x = 0.0f,
+                .y = 0.0f,
+                .z = sin_approx(-heading * 0.5f),
+            };
+            quaternion_t qYawConj;
+            imuQuaternionConjugate(&qYaw, &qYawConj);
+
+            quaternion_t qRpTrim;
+            imuQuaternionMultiplyConst(&qYawConj, &bodyAtLevel, &qRpTrim);
+            if (!imuQuaternionNormalize(&qRpTrim)) {
+                sflpLevelCalActive = false;
+                return;
+            }
+
+            quaternion_t level;
+            imuQuaternionMultiplyConst(&qRpTrim, &sflpLevelCalDefaultLevel, &level);
+            if (imuQuaternionNormalize(&level)) {
+                imuSflpConfigMutable()->sflp_q_level = level;
+                imuSflpConfigMutable()->sflp_q_level_valid = 1;
+            }
+        }
+        sflpLevelCalActive = false;
+    }
+}
+
+void imuStartSflpLevelCalibration(void)
+{
+    if (!imuSflpPathEnabled()) {
+        return;
+    }
+
+    sflpLevelCalDefaultLevel = imuSflpDefaultLevelQuat();
+    if (!imuQuaternionNormalize(&sflpLevelCalDefaultLevel)) {
+        sflpLevelCalDefaultLevel = (quaternion_t)QUATERNION_INITIALIZE;
+    }
+
+    sflpLevelCalActive = true;
+    sflpLevelCalSamplesRemaining = SFLP_LEVEL_CAL_SAMPLES;
+    sflpLevelCalAccum = (quaternion_t){.w = 0, .x = 0, .y = 0, .z = 0};
+    sflpLevelCalRef = (quaternion_t)QUATERNION_INITIALIZE;
+    sflpLevelCalRefValid = false;
+}
+
+void imuInvalidateSflpLevelCalibration(void)
+{
+    sflpLevelCalActive = false;
+    sflpLevelCalSamplesRemaining = 0;
+    sflpLevelCalAccum = (quaternion_t){.w = 0, .x = 0, .y = 0, .z = 0};
+    sflpLevelCalRef = (quaternion_t)QUATERNION_INITIALIZE;
+    sflpLevelCalRefValid = false;
+    sflpLevelCalDefaultLevel = (quaternion_t)QUATERNION_INITIALIZE;
+
+    imuSflpConfigMutable()->sflp_q_level = (quaternion_t)QUATERNION_INITIALIZE;
+    imuSflpConfigMutable()->sflp_q_level_valid = 0;
+}
+
+bool imuIsSflpLevelCalibrationActive(void)
+{
+    return sflpLevelCalActive;
+}
+
+bool imuIsSflpLevelCalibrationValid(void)
+{
+    return imuSflpConfig()->sflp_q_level_valid != 0;
+}
+
+bool imuIsUsingSflpAttitude(void)
+{
+    return sflpAttitudeActiveLastCycle;
+}
+
+bool imuIsSflpAttitudeAvailable(void)
+{
+    const gyroDev_t *gyroDev = gyroActiveDev();
+    return gyroDev && (gyroDev->mpuDetectionResult.sensor == LSM6DSK320X_SPI);
+}
+
+uint16_t imuGetSflpConsecutiveReadFails(void)
+{
+    return sflpConsecutiveReadFails;
+}
+
+uint32_t imuGetSflpReadCallCount(void)
+{
+    return sflpReadCallCount;
+}
+
+uint32_t imuGetSflpReadOkCount(void)
+{
+    return sflpReadOkCount;
+}
+
+uint32_t imuGetSflpEstimatedNewFrameCount(void)
+{
+    return sflpEstimatedNewFrameCount;
+}
+
+uint32_t imuGetSflpDistinctQuatCount(void)
+{
+    return sflpDistinctQuatCount;
+}
+
+float imuGetSflpEstimatedNewFrameRateHz(void)
+{
+    if (!sflpReadStatsStartUs || !sflpEstimatedNewFrameCount) {
+        return 0.0f;
+    }
+
+    const timeDelta_t elapsedUs = cmpTimeUs(micros(), sflpReadStatsStartUs);
+    if (elapsedUs <= 0) {
+        return 0.0f;
+    }
+
+    return (float)sflpEstimatedNewFrameCount / (elapsedUs * 1e-6f);
+}
+
+static bool imuSflpReadSensorQuaternion(quaternion_t *sflpQuat, timeUs_t currentTimeUs)
+{
+    sflpReadCallCount++;
+
+    gyroDev_t *gyroDev = gyroActiveDev();
+    if (!gyroDev || gyroDev->mpuDetectionResult.sensor != LSM6DSK320X_SPI) {
+        return false;
+    }
+
+    quaternion_t q;
+    if (lsm6dsk320xSflpReadQuat(gyroDev, &q.w, &q.x, &q.y, &q.z)) {
+#if defined(USE_IMU_LSM6DSK320X_SFLP_ENU_TO_NED)
+        // ST SFLP game rotation vector uses ENU convention; BF attitude uses NED body sign.
+        // Convert quaternion vector part from ENU to NED by flipping X/Y signs.
+        q.x = -q.x;
+        q.y = -q.y;
+#endif
+
+        // Hemisphere continuity: prevent sign flips between consecutive reads.
+        const quaternion_t prev = sflpPrevQuatValid ? sflpPrevQuat : (quaternion_t)QUATERNION_INITIALIZE;
+        if (imuQuaternionDot(&q, &prev) < 0.0f) {
+            q.w = -q.w;
+            q.x = -q.x;
+            q.y = -q.y;
+            q.z = -q.z;
+        }
+
+        // Normalize for robustness.
+        const float normSq = sq(q.w) + sq(q.x) + sq(q.y) + sq(q.z);
+        if (normSq > 0.5f && normSq < 1.5f) {
+            const float recipNorm = 1.0f / sqrtf(normSq);
+            sflpQuat->w = q.w * recipNorm;
+            sflpQuat->x = q.x * recipNorm;
+            sflpQuat->y = q.y * recipNorm;
+            sflpQuat->z = q.z * recipNorm;
+
+            sflpReadOkCount++;
+            if (!sflpReadStatsStartUs) {
+                sflpReadStatsStartUs = currentTimeUs;
+            }
+            if (!sflpLastReadOkUs) {
+                sflpLastReadOkUs = currentTimeUs;
+                sflpEstimatedNewFrameCount++;
+            } else {
+                const timeDelta_t dtUs = cmpTimeUs(currentTimeUs, sflpLastReadOkUs);
+                if (dtUs > 0) {
+                    sflpEstimatedFrameAccumulatorUs += (float)dtUs;
+                    while (sflpEstimatedFrameAccumulatorUs >= SFLP_GAME_FRAME_PERIOD_US) {
+                        sflpEstimatedFrameAccumulatorUs -= SFLP_GAME_FRAME_PERIOD_US;
+                        sflpEstimatedNewFrameCount++;
+                    }
+                }
+                sflpLastReadOkUs = currentTimeUs;
+            }
+
+            if (!sflpLastRawQuatValid
+                || q.w != sflpLastRawQuat.w
+                || q.x != sflpLastRawQuat.x
+                || q.y != sflpLastRawQuat.y
+                || q.z != sflpLastRawQuat.z) {
+                sflpDistinctQuatCount++;
+                sflpLastRawQuat = q;
+                sflpLastRawQuatValid = true;
+            }
+
+            sflpPrevQuat = *sflpQuat;
+            sflpPrevQuatValid = true;
+            sflpConsecutiveReadFails = 0;
+            return true;
+        }
+    }
+
+    sflpConsecutiveReadFails++;
+    if (sflpPrevQuatValid && sflpConsecutiveReadFails <= SFLP_MAX_READ_FAILS) {
+        *sflpQuat = sflpPrevQuat;
+        return true;
+    }
+
+    if (sflpLevelCalActive && sflpConsecutiveReadFails > SFLP_MAX_READ_FAILS) {
+        sflpLevelCalActive = false;
+        sflpLevelCalSamplesRemaining = 0;
+    }
+
+    return false;
+}
+
+static float imuSflpCalcHeadingDt(timeUs_t currentTimeUs)
+{
+    float dt = 0.0f;
+    if (sflpLastHeadingUpdateUs) {
+        dt = (currentTimeUs - sflpLastHeadingUpdateUs) * 1e-6f;
+    }
+    sflpLastHeadingUpdateUs = currentTimeUs;
+    return dt;
+}
+
+static void imuSflpRefreshHeadingState(void)
+{
+    const bool armed = ARMING_FLAG(ARMED);
+    bool gpsFix = false;
+#if defined(USE_GPS)
+    gpsFix = sensors(SENSOR_GPS) && STATE(GPS_FIX) && gpsSol.numSat > GPS_MIN_SAT_COUNT;
+#endif
+
+    if (!armed && sflpWasArmed) {
+        sflpGpsHeadingInitialized = false;
+        sflpDeltaPsi = 0.0f;
+        sflpDeltaPsiIntegral = 0.0f;
+        sflpLastHeadingUpdateUs = 0;
+    }
+
+    if (sflpHadGpsFix && !gpsFix) {
+        sflpGpsHeadingInitialized = false;
+        sflpDeltaPsi = 0.0f;
+        sflpDeltaPsiIntegral = 0.0f;
+        sflpLastHeadingUpdateUs = 0;
+    }
+
+    sflpWasArmed = armed;
+    sflpHadGpsFix = gpsFix;
+}
+
+static float imuSflpHeadingFromQuat(const quaternion_t *quat)
+{
+    quaternionProducts qp;
+    quaternion_t qCopy = *quat;
+    imuQuaternionComputeProducts(&qCopy, &qp);
+
+    const float r10 = 2.0f * (qp.xy - -qp.wz);
+    const float r00 = 1.0f - 2.0f * qp.yy - 2.0f * qp.zz;
+    return -atan2_approx(r10, r00);
+}
+
+static quaternion_t imuSflpGetLevelQuat(void)
+{
+    if (!imuSflpConfig()->sflp_q_level_valid) {
+        return imuSflpDefaultLevelQuat();
+    }
+
+    quaternion_t level = imuSflpConfig()->sflp_q_level;
+    if (imuQuaternionNormalize(&level)) {
+        return level;
+    }
+
+    imuSflpConfigMutable()->sflp_q_level_valid = 0;
+    return imuSflpDefaultLevelQuat();
+}
+
+static void imuSflpUpdateDeltaPsi(timeUs_t currentTimeUs)
+{
+    imuSflpRefreshHeadingState();
+
+    bool useMag = false;
+    float headingErr = 0.0f;
+    float dt = 0.0f;
+
+#ifdef USE_MAG
+    if (sensors(SENSOR_MAG)
+        && compassIsHealthy()
+#ifdef USE_GPS_RESCUE
+        && !gpsRescueDisableMag()
+#endif
+        && mag.isNewMagADCFlag) {
+        useMag = true;
+        mag.isNewMagADCFlag = false;
+        headingErr = imuCalcMagErr();
+        dt = imuSflpCalcHeadingDt(currentTimeUs);
+    }
+#endif
+
+#if defined(USE_GPS)
+    if (!useMag
+        && sensors(SENSOR_GPS)
+        && STATE(GPS_FIX)
+        && gpsSol.numSat > GPS_MIN_SAT_COUNT
+        && (GPS_update != sflpLastGpsUpdate)) {
+        sflpLastGpsUpdate = GPS_update;
+        dt = imuSflpCalcHeadingDt(currentTimeUs);
+
+        if (sflpGpsHeadingInitialized) {
+            float groundspeedGain;
+            if (FLIGHT_MODE(GPS_RESCUE_MODE)) {
+                groundspeedGain = gpsRescueGetImuYawCogGain();
+            } else {
+                groundspeedGain = imuCalcGroundspeedGain(dt);
+            }
+
+            const float courseOverGround = DECIDEGREES_TO_RADIANS(gpsSol.groundCourse);
+            const float imuCourseError = imuCalcCourseErr(courseOverGround);
+            headingErr = imuCourseError * groundspeedGain;
+            updateGpsHeadingUsable(groundspeedGain, imuCourseError, dt);
+        } else if (gpsSol.groundSpeed > GPS_COG_MIN_GROUNDSPEED) {
+            const float headingFromQFinal = -atan2_approx(rMat.m[1][0], rMat.m[0][0]);
+            const float gpsHeading = DECIDEGREES_TO_RADIANS(gpsSol.groundCourse);
+            sflpDeltaPsi = imuWrapPi(gpsHeading - headingFromQFinal);
+            sflpDeltaPsiIntegral = 0.0f;
+            sflpGpsHeadingInitialized = true;
+            return;
+        } else {
+            return;
+        }
+    }
+#endif
+
+    if (dt <= 0.0f) {
+        return;
+    }
+
+    const float spinRateDps = sqrtf(sq(gyro.gyroADCf[X]) + sq(gyro.gyroADCf[Y]) + sq(gyro.gyroADCf[Z]));
+    const bool freezeIntegral = (cmpTimeUs(currentTimeUs, sflpStartTimeUs + SFLP_STARTUP_SETTLE_TIME_US) < 0)
+        || (spinRateDps > SPIN_RATE_LIMIT);
+
+    if (imuRuntimeConfig.imuDcmKi > 0.0f) {
+        if (!freezeIntegral) {
+            sflpDeltaPsiIntegral += imuRuntimeConfig.imuDcmKi * headingErr * dt;
+        }
+        if (sflpDeltaPsiIntegral > M_PIf) {
+            sflpDeltaPsiIntegral = M_PIf;
+        } else if (sflpDeltaPsiIntegral < -M_PIf) {
+            sflpDeltaPsiIntegral = -M_PIf;
+        }
+    } else {
+        sflpDeltaPsiIntegral = 0.0f;
+    }
+
+    const float yawRateCorrection = imuRuntimeConfig.imuDcmKp * headingErr + sflpDeltaPsiIntegral;
+    sflpDeltaPsi = imuWrapPi(sflpDeltaPsi + yawRateCorrection * dt);
+}
+
+static bool imuCalculateEstimatedAttitudeSflp(timeUs_t currentTimeUs)
+{
+    quaternion_t qSflp;
+    if (!imuSflpReadSensorQuaternion(&qSflp, currentTimeUs)) {
+        return false;
+    }
+
+    if (!sflpStartTimeUs) {
+        sflpStartTimeUs = currentTimeUs;
+    }
+
+    imuSflpLevelCalibrationAccumulate(&qSflp);
+
+    // SFLP outputs the sensor attitude quaternion (sensor-to-Earth).
+    // qLevel is the mount quaternion (sensor-to-body), either from config alignment or level calibration.
+    // BF needs body-to-Earth, so: q_bf = q_sflp * q_level_inverse.
+    const quaternion_t qLevel = imuSflpGetLevelQuat();
+    quaternion_t qLevelConj;
+    imuQuaternionConjugate(&qLevel, &qLevelConj);
+
+    quaternion_t qBody;
+    imuQuaternionMultiplyConst(&qSflp, &qLevelConj, &qBody);
+    if (!imuQuaternionNormalize(&qBody)) {
+        return false;
+    }
+
+    // SFLP is 6DoF (no absolute heading); align its yaw basis with the previous estimator
+    // on activation so roll/pitch stay consistent with the existing attitude frame.
+    if (!sflpAttitudeActiveLastCycle) {
+        const float headingRef = -atan2_approx(rMat.m[1][0], rMat.m[0][0]);
+        const float headingSflp = imuSflpHeadingFromQuat(&qBody);
+        sflpDeltaPsi = imuWrapPi(headingRef - headingSflp);
+        sflpDeltaPsiIntegral = 0.0f;
+        sflpLastHeadingUpdateUs = currentTimeUs;
+    }
+
+    imuSflpUpdateDeltaPsi(currentTimeUs);
+
+    quaternion_t qYawCorrection = {
+        .w = cos_approx(-sflpDeltaPsi * 0.5f),
+        .x = 0.0f,
+        .y = 0.0f,
+        .z = sin_approx(-sflpDeltaPsi * 0.5f),
+    };
+
+    quaternion_t qFinal;
+    imuQuaternionMultiplyConst(&qYawCorrection, &qBody, &qFinal);
+    if (!imuQuaternionNormalize(&qFinal)) {
+        return false;
+    }
+
+    q = qFinal;
+    imuComputeRotationMatrix();
+    imuUpdateEulerAngles();
+    attitudeIsEstablished = true;
+    return true;
+}
+#else
+void imuStartSflpLevelCalibration(void)
+{
+}
+
+void imuInvalidateSflpLevelCalibration(void)
+{
+}
+
+bool imuIsSflpLevelCalibrationActive(void)
+{
+    return false;
+}
+
+bool imuIsSflpLevelCalibrationValid(void)
+{
+    return false;
+}
+
+bool imuIsUsingSflpAttitude(void)
+{
+    return false;
+}
+
+bool imuIsSflpAttitudeAvailable(void)
+{
+    return false;
+}
+
+uint16_t imuGetSflpConsecutiveReadFails(void)
+{
+    return 0;
+}
+
+uint32_t imuGetSflpReadCallCount(void)
+{
+    return 0;
+}
+
+uint32_t imuGetSflpReadOkCount(void)
+{
+    return 0;
+}
+
+uint32_t imuGetSflpEstimatedNewFrameCount(void)
+{
+    return 0;
+}
+
+uint32_t imuGetSflpDistinctQuatCount(void)
+{
+    return 0;
+}
+
+float imuGetSflpEstimatedNewFrameRateHz(void)
+{
+    return 0.0f;
+}
+#endif
+
 static void imuCalculateEstimatedAttitude(timeUs_t currentTimeUs)
 {
 #if defined(SIMULATOR_BUILD) && defined(SIMULATOR_IMU_SYNC)
@@ -648,6 +1427,17 @@ static void imuCalculateEstimatedAttitude(timeUs_t currentTimeUs)
     previousIMUUpdateTime = currentTimeUs;
 #endif
     const float dt = deltaT * 1e-6f;
+
+#if defined(USE_IMU_LSM6DSK320X_SFLP_FIFO_ATT) && defined(USE_ACCGYRO_LSM6DSK320X)
+    if (imuSflpPathEnabled()) {
+        if (imuCalculateEstimatedAttitudeSflp(currentTimeUs)) {
+            // SFLP is the only running attitude solver on the 320X path.
+            sflpAttitudeActiveLastCycle = true;
+            return;
+        }
+    }
+    sflpAttitudeActiveLastCycle = false;
+#endif
 
     // *** magnetometer based error estimate ***
     bool useMag = false;   // mag will suppress GPS correction

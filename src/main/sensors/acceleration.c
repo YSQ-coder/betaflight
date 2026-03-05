@@ -63,6 +63,8 @@ static inline void calibrateAccelerometer(void)
     if (featureIsEnabled(FEATURE_INFLIGHT_ACC_CAL)) {
         performInflightAccelerationCalibration(&accelerometerConfigMutable()->accelerometerTrims);
     }
+
+    processAccelerometerCalibrationSave();
 }
 
 static inline void applyAccelerationTrims(const flightDynamicsTrims_t *accelerationTrims)

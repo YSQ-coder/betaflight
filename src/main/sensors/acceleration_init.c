@@ -52,6 +52,7 @@
 
 #include "drivers/accgyro/accgyro_spi_lsm6dso.h"
 #include "drivers/accgyro/accgyro_spi_lsm6dsv16x.h"
+#include "drivers/accgyro/accgyro_spi_scs3301.h"
 
 #include "drivers/accgyro/accgyro_spi_mpu6000.h"
 #include "drivers/accgyro/accgyro_spi_mpu6500.h"
@@ -62,6 +63,7 @@
 #include "drivers/bus_spi.h"
 
 #include "fc/runtime_config.h"
+#include "flight/imu.h"
 
 #include "io/beeper.h"
 
@@ -78,6 +80,7 @@
 #define CALIBRATING_ACC_CYCLES              400
 
 FAST_DATA_ZERO_INIT accelerationRuntime_t accelerationRuntime;
+static bool accCalibrationSavePending = false;
 
 void resetRollAndPitchTrims(rollAndPitchTrims_t *rollAndPitchTrims)
 {
@@ -311,6 +314,15 @@ retry:
         FALLTHROUGH;
 #endif
 
+#ifdef USE_ACCGYRO_SCS3301
+    case ACC_SCS3301:
+        if (scs3301SpiAccDetect(dev)) {
+            accHardware = ACC_SCS3301;
+            break;
+        }
+        FALLTHROUGH;
+#endif
+
 #ifdef USE_ACCGYRO_ICM40609D
     case ACC_ICM40609D:
         if (icm40609SpiAccDetect(dev)) {
@@ -398,11 +410,33 @@ bool accInit(uint16_t accSampleRateHz)
 void accStartCalibration(void)
 {
     accelerationRuntime.calibratingA = CALIBRATING_ACC_CYCLES;
+    accCalibrationSavePending = false;
+    // Reset stale SFLP level override and recalculate it from the ACC calibration pose.
+    imuInvalidateSflpLevelCalibration();
+    imuStartSflpLevelCalibration();
 }
 
 bool accIsCalibrationComplete(void)
 {
     return accelerationRuntime.calibratingA == 0;
+}
+
+void processAccelerometerCalibrationSave(void)
+{
+    if (!accCalibrationSavePending) {
+        return;
+    }
+
+    if (ARMING_FLAG(ARMED)) {
+        return;
+    }
+
+    if (imuIsSflpLevelCalibrationActive()) {
+        return;
+    }
+
+    saveConfigAndNotify();
+    accCalibrationSavePending = false;
 }
 
 static bool isOnFinalAccelerationCalibrationCycle(void)
@@ -443,7 +477,11 @@ void performAccelerometerCalibration(rollAndPitchTrims_t *rollAndPitchTrims)
         resetRollAndPitchTrims(rollAndPitchTrims);
         setConfigCalibrationCompleted();
 
-        saveConfigAndNotify();
+        if (imuIsSflpLevelCalibrationActive()) {
+            accCalibrationSavePending = true;
+        } else {
+            saveConfigAndNotify();
+        }
     }
 
     accelerationRuntime.calibratingA--;
