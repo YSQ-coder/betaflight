@@ -55,7 +55,9 @@ typedef enum {
     ACC_ICM45686,
     ACC_ICM40609D,
     ACC_IIM42652,
-    ACC_VIRTUAL
+    ACC_LSM6DSK320X,
+    ACC_VIRTUAL,
+    ACC_HARDWARE_COUNT
 } accelerationSensor_e;
 
 typedef struct acc_s {
