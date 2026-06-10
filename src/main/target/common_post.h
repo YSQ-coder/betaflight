@@ -39,6 +39,13 @@
 
 */
 
+// USE_KAACK_SPEC: KAACK motor-spec preset selection (5 hardcoded specs)
+// Requires: USE_RPM_LIMIT && USE_CMS && USE_OSD
+// Auto-enabled when all dependencies are met, or manually opt-in via target.h
+#if defined(USE_KAACK_SPEC) && (!defined(USE_RPM_LIMIT) || !defined(USE_CMS) || !defined(USE_OSD))
+#error "USE_KAACK_SPEC requires USE_RPM_LIMIT, USE_CMS, and USE_OSD"
+#endif
+
 #ifndef PLATFORM_NO_LIBC
 #define PLATFORM_NO_LIBC 1
 #endif
@@ -686,4 +693,9 @@ extern struct linker_symbol __config_end;
 #define USE_PIN_PULL_UP_DOWN
 #endif
 #endif // USE_PINIO
+
+// Auto-enable KAACK_SPEC when all dependencies are met
+#if defined(USE_RPM_LIMIT) && defined(USE_CMS) && defined(USE_OSD)
+#define USE_KAACK_SPEC
+#endif
 

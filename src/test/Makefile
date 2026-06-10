@@ -339,6 +339,13 @@ sensor_gyro_unittest_SRC := \
 		$(USER_DIR)/pg/pg.c \
 		$(USER_DIR)/pg/gyrodev.c
 
+spec_unittest_SRC := \
+		$(USER_DIR)/common/spec.c
+
+spec_unittest_DEFINES := \
+		USE_KAACK_SPEC= \
+		USE_RPM_LIMIT=
+
 telemetry_crsf_unittest_SRC := \
 		$(USER_DIR)/rx/crsf.c \
 		$(USER_DIR)/telemetry/crsf.c \

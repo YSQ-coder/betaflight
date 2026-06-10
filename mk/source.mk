@@ -75,6 +75,7 @@ COMMON_SRC = \
             common/streambuf.c \
             common/string_light.c \
             common/strtol.c \
+            common/spec.c \
             common/time.c \
             common/typeconversion.c \
             common/uvarint.c \
@@ -232,6 +233,7 @@ COMMON_SRC = \
             cms/cms_menu_vtx_tramp.c \
             cms/cms_menu_persistent_stats.c \
             cms/cms_menu_rpm_limit.c \
+            cms/cms_menu_spec.c \
             cms/cms_menu_quick.c \
             drivers/display_ug2864hsweg01.c \
             drivers/light_ws2811strip.c \
@@ -514,6 +516,7 @@ SIZE_OPTIMISED_SRC += \
             cms/cms_menu_vtx_tramp.c \
             cms/cms_menu_persistent_stats.c \
             cms/cms_menu_rpm_limit.c \
+            cms/cms_menu_spec.c \
             cms/cms_menu_quick.c \
             io/vtx.c \
             io/vtx_rtc6705.c \

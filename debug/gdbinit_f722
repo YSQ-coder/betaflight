@@ -1,0 +1,74 @@
+# GDB init for Betaflight F722 debugging via OpenOCD
+# Usage:
+#   1. Start OpenOCD first:
+#      sudo ./tools/openocd/bin/openocd -s tools/openocd/share/openocd/scripts -f debug/openocd_f722.cfg
+#   2. Then start GDB:
+#      gdb-multiarch -x debug/gdbinit_f722
+#
+# Or all-in-one:
+#      gdb-multiarch -x debug/gdbinit_f722 obj/main/betaflight_STM32F7X2_RATEF722_V4_AIO.elf
+
+# Connect to OpenOCD GDB server
+target extended-remote :3333
+
+# Load the ELF for symbols (update path if target changes)
+file obj/main/betaflight_STM32F7X2_RATEF722_V4_AIO.elf
+
+# Memory layout (from stm32_flash_f722.ld)
+# ITCM_RAM:    0x00000000 - 16K
+# AXIM_FLASH:  0x08000000 - 512K (16K ISR + 16K config + 480K firmware)
+# DTCM_RAM:    0x20000000 - 64K
+# SRAM1:       0x20010000 - 176K
+# SRAM2:       0x2003C000 - 16K
+
+# Pretty printing
+set print pretty on
+set print elements 0
+set pagination off
+
+# Don't confirm on quit
+set confirm off
+
+# Monitor (OpenOCD) helper commands
+define rst
+  monitor reset halt
+end
+document rst
+  Reset and halt the target
+end
+
+define reflash
+  monitor reset halt
+  monitor program obj/main/betaflight_STM32F7X2_RATEF722_V4_AIO.elf verify
+  monitor reset halt
+end
+document reflash
+  Re-flash the current ELF and halt
+end
+
+define regs
+  info registers
+end
+document regs
+  Show all CPU registers
+end
+
+define stacks
+  monitor reg sp
+  x/32xw $sp
+end
+document stacks
+  Dump 32 words from current stack pointer
+end
+
+define bfver
+  print *(const char **)&shortGitRevision
+  print *(const char **)&buildDate
+  print *(const char **)&buildTime
+end
+document bfver
+  Print Betaflight version/build info
+end
+
+# Initial state: halt and show where we are
+monitor reset halt
