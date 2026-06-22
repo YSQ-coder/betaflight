@@ -33,7 +33,7 @@
 #include "drivers/io_impl.h"
 #include "platform/rcc.h"
 #include "drivers/dma.h"
-#ifdef MH2425_COMPAT_PATCH
+#ifdef MH2425_COMPAT_PATCH_ADC_INT
 #include "drivers/nvic.h"
 #endif
 #include "drivers/sensor.h"
@@ -129,13 +129,11 @@ const adcTagMap_t adcTagMap[] = {
 #define TS_CAL1_ADDR      0x1FFF7A2C
 #define TS_CAL2_ADDR      0x1FFF7A2E
 
-#ifdef MH2425_COMPAT_PATCH
-#ifdef USE_ADC_INTERRUPT
+#ifdef MH2425_COMPAT_PATCH_ADC_INT
 #define NVIC_PRIO_ADC NVIC_BUILD_PRIORITY(0, 0)
 
 static uint8_t adcIntChannelIndex[ADCDEV_COUNT];
 static uint8_t adcIntChannelCount[ADCDEV_COUNT];
-#endif
 #endif
 
 static void adcInitDevice(ADC_TypeDef *adcdev, int channelCount)
@@ -310,7 +308,7 @@ void adcInit(const adcConfig_t *config)
         }
         ADC_RegularChannelConfig(adc.ADCx, adcOperatingConfig[i].adcChannel, rank++, adcOperatingConfig[i].sampleTime);
     }
-#if defined(MH2425_COMPAT_PATCH) && defined(USE_ADC_INTERRUPT)
+#ifdef MH2425_COMPAT_PATCH_ADC_INT
     // Set EOC to fire for each conversion (not just end of sequence)
     adc.ADCx->CR2 |= ADC_CR2_EOCS;
 
@@ -328,7 +326,7 @@ void adcInit(const adcConfig_t *config)
     NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
     NVIC_Init(&NVIC_InitStructure);
 #endif
-#if !defined(MH2425_COMPAT_PATCH) || !defined(USE_ADC_INTERRUPT)
+#ifndef MH2425_COMPAT_PATCH_ADC_INT
     ADC_DMARequestAfterLastTransferCmd(adc.ADCx, ENABLE);
 
     ADC_DMACmd(adc.ADCx, ENABLE);
@@ -382,7 +380,7 @@ void adcInit(const adcConfig_t *config)
     xDMA_Init(adc.dmaResource, &DMA_InitStructure);
     xDMA_Cmd(adc.dmaResource, ENABLE);
 #endif
-#endif // !MH2425_COMPAT_PATCH || !USE_ADC_INTERRUPT
+#endif // !MH2425_COMPAT_PATCH_ADC_INT
 
     ADC_SoftwareStartConv(adc.ADCx);
 }
@@ -392,7 +390,7 @@ void adcGetChannelValues(void)
     // Nothing to do
 }
 
-#if defined(MH2425_COMPAT_PATCH) && defined(USE_ADC_INTERRUPT)
+#ifdef MH2425_COMPAT_PATCH_ADC_INT
 
 void ADC_RestartConv(ADC_TypeDef *adcdev)
 {
@@ -449,5 +447,5 @@ void ADC_IRQHandler(void)
     }
 #endif
 }
-#endif // MH2425_COMPAT_PATCH && USE_ADC_INTERRUPT
+#endif // MH2425_COMPAT_PATCH_ADC_INT
 #endif
